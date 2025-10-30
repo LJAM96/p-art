@@ -41,7 +41,7 @@ log = logging.getLogger("plex-art-filler")
 DEFAULT_TIMEOUT = 12
 DEFAULT_MIN_POSTER_WIDTH = 600
 DEFAULT_MIN_BACKGROUND_WIDTH = 1920
-CONFIG_PATH = Path(".plex_art_tui_config.json")
+CONFIG_PATH = Path(".p_art_config.json")
 
 TRUSTED_PROVIDERS = {
     "tmdb", "themoviedb",
