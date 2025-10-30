@@ -27,6 +27,16 @@ from urllib.parse import urlparse
 import requests
 from plexapi.server import PlexServer
 
+@dataclass
+class ChangeLogEntry:
+    title: str
+    poster_changed: bool = False
+    background_changed: bool = False
+    source: Optional[str] = None
+    dry_run: bool = False
+
+_change_log: List[ChangeLogEntry] = []
+
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -451,6 +461,15 @@ def process_item(item, tmdb_key: str, fanart_key: str, omdb_key: str,
         if not result.poster_url and not result.background_url:
             log.info(f"  - No artwork found for: {title}")
 
+    if updated or (dry_run and (result.poster_url or result.background_url)):
+        _change_log.append(ChangeLogEntry(
+            title=title,
+            poster_changed=bool(result.poster_url and (overwrite or not has_poster)),
+            background_changed=bool(include_backgrounds and result.background_url and (overwrite or not has_background)),
+            source=result.source,
+            dry_run=dry_run
+        ))
+
 def main():
     """Main CLI interface."""
     print("=" * 60)
@@ -577,6 +596,21 @@ def main():
     print(f"\n{'=' * 60}")
     print(f"Processing complete! Processed {total_items} items.")
     print(f"Cache saved to: {CACHE_PATH}")
+
+    if _change_log:
+        print(f"\nSummary of changes ({len(_change_log)} items):")
+        for entry in _change_log:
+            status = "[DRY RUN]" if entry.dry_run else "[CHANGED]"
+            poster_status = "Poster" if entry.poster_changed else ""
+            background_status = "Background" if entry.background_changed else ""
+            artwork_type = ", ".join(filter(None, [poster_status, background_status]))
+            if artwork_type:
+                print(f"  {status} {entry.title}: {artwork_type} from {entry.source}")
+            else:
+                print(f"  {status} {entry.title}: No artwork updated (already present or not found)")
+    else:
+        print("\nNo artwork changes were made.")
+
     print(f"{'=' * 60}")
 
 if __name__ == "__main__":
