@@ -512,7 +512,12 @@ def main():
     # Step 4: Options
     print("\n[Step 4/5] Processing Options")
     include_backgrounds = os.getenv("INCLUDE_BACKGROUNDS", "").lower() in ('true', '1', 'y', 'yes') if os.getenv("INCLUDE_BACKGROUNDS") else get_yes_no("Include backgrounds/art?", saved_config.get("include_backgrounds", True))
-    overwrite = os.getenv("OVERWRITE", "").lower() in ('true', '1', 'y', 'yes') if os.getenv("OVERWRITE") else get_yes_no("Overwrite existing artwork?", saved_config.get("overwrite", False))
+    only_missing_env = os.getenv("ONLY_MISSING", "").lower()
+    if only_missing_env in ('true', '1', 'y', 'yes'):
+        overwrite = False
+        print("  - ONLY_MISSING is set, so existing artwork will not be overwritten.")
+    else:
+        overwrite = os.getenv("OVERWRITE", "").lower() in ('true', '1', 'y', 'yes') if os.getenv("OVERWRITE") else get_yes_no("Overwrite existing artwork?", saved_config.get("overwrite", False))
     dry_run = os.getenv("DRY_RUN", "").lower() in ('true', '1', 'y', 'yes') if os.getenv("DRY_RUN") else get_yes_no("Dry run (don't actually upload)?", saved_config.get("dry_run", True))
 
     # Save configuration for next run
