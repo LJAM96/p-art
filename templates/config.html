@@ -4,51 +4,41 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Configuration - P-Art</title>
-    <style>
-        body {
-            font-family: sans-serif;
-        }
-        .container {
-            max-width: 800px;
-            margin: 0 auto;
-            padding: 20px;
-        }
-        .form-group {
-            margin-bottom: 15px;
-        }
-        .form-group label {
-            display: block;
-            margin-bottom: 5px;
-        }
-        .form-group input {
-            width: 100%;
-            padding: 8px;
-            box-sizing: border-box;
-        }
-        .btn {
-            padding: 10px 15px;
-            border: none;
-            background-color: #007bff;
-            color: white;
-            cursor: pointer;
-        }
-    </style>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
 </head>
 <body>
-    <div class="container">
+    <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+        <div class="container-fluid">
+            <a class="navbar-brand" href="/">P-Art</a>
+            <div class="collapse navbar-collapse" id="navbarNav">
+                <ul class="navbar-nav">
+                    <li class="nav-item">
+                        <a class="nav-link active" aria-current="page" href="/config">Configuration</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="/approve">Approve Changes</a>
+                    </li>
+                </ul>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container mt-4">
         <h1>Configuration</h1>
         <form action="/config" method="post">
             {% for key, value in config.items() %}
-            <div class="form-group">
-                <label for="{{ key }}">{{ key }}</label>
-                <input type="text" id="{{ key }}" name="{{ key }}" value="{{ value }}" {% if key.upper() in env_keys %}disabled{% endif %}>
+            <div class="mb-3">
+                <label for="{{ key }}" class="form-label">{{ key }}</label>
+                <input type="text" class="form-control" id="{{ key }}" name="{{ key }}" value="{{ value }}" {% if key.upper() in env_keys %}disabled{% endif %}>
                 {% if key.upper() in env_keys %}
-                <small>This value is set by the {{ key.upper() }} environment variable.</small>
+                <div class="form-text">This value is set by the {{ key.upper() }} environment variable.</div>
                 {% endif %}
             </div>
             {% endfor %}
-            <button type="submit" class="btn">Save Configuration</button>
+            <button type="submit" class="btn btn-primary">Save Configuration</button>
         </form>
     </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>
