@@ -132,6 +132,7 @@ limiters = {
     "api.themoviedb.org": RateLimiter(rate_per_sec=2.0),
     "webservice.fanart.tv": RateLimiter(rate_per_sec=1.0),
     "www.omdbapi.com": RateLimiter(rate_per_sec=3.0),
+    "api.thetvdb.com": RateLimiter(rate_per_sec=1.0),
 }
 
 session = requests.Session()
@@ -296,6 +297,47 @@ def omdb_art(api_key: Optional[str], imdb_id: Optional[str]) -> ArtResult:
     cache_set(ns, key, res.__dict__)
     return res
 
+def tvdb_art(api_key: Optional[str], tvdb_id: Optional[str],
+             min_poster_w: int, min_back_w: int) -> ArtResult:
+    if not api_key or not tvdb_id:
+        return ArtResult()
+    ns = "tvdb"
+    key = tvdb_id
+    cached = cache_get(ns, key)
+    if cached:
+        return ArtResult(**cached)
+
+    base = "https://api.thetvdb.com"
+    headers = {"Accept": "application/json", "Authorization": f"Bearer {api_key}"}
+
+    # TheTVDB API requires a JWT token. The API key provided by the user is the JWT token.
+    # First, we need to get the series images.
+    r = safe_get(f"{base}/v3/series/{tvdb_id}/images/query", params={"keyType": "poster"}, headers=headers)
+    if not r:
+        return ArtResult()
+    data = r.json()
+    posters = []
+    if "data" in data:
+        for p in data["data"]:
+            posters.append({"url": f"{base}/banners/{p['fileName']}", "width": p.get("resolution", "0x0").split('x')[0]})
+
+    r = safe_get(f"{base}/v3/series/{tvdb_id}/images/query", params={"keyType": "fanart"}, headers=headers)
+    if not r:
+        return ArtResult()
+    data = r.json()
+    backgrounds = []
+    if "data" in data:
+        for b in data["data"]:
+            backgrounds.append({"url": f"{base}/banners/{b['fileName']}", "width": b.get("resolution", "0x0").split('x')[0]})
+
+    res = ArtResult(
+        poster_url=pick_best_image(posters, min_poster_w),
+        background_url=pick_best_image(backgrounds, min_back_w),
+        source="tvdb"
+    )
+    cache_set(ns, key, res.__dict__)
+    return res
+
 # ---------- CLI Functions ----------
 def get_input(prompt: str, default: str = "") -> str:
     """Get input from user with optional default value."""
@@ -385,7 +427,7 @@ def select_libraries(plex: PlexServer) -> List:
         print("\nTry again or check your Plex server status.")
         return []
 
-def process_item(item, tmdb_key: str, fanart_key: str, omdb_key: str,
+def process_item(item, tmdb_key: str, fanart_key: str, omdb_key: str, tvdb_key: str,
                  include_backgrounds: bool, overwrite: bool, dry_run: bool,
                  min_poster_w: int, min_back_w: int, provider_priority: List[str]):
     """Process a single item (movie or show) to fill missing artwork."""
@@ -435,6 +477,16 @@ def process_item(item, tmdb_key: str, fanart_key: str, omdb_key: str,
             provider_result = omdb_art(omdb_key, ids['imdb'])
             if provider_result.poster_url:
                 result.poster_url = provider_result.poster_url
+                result.source = provider_result.source
+
+        elif provider == 'tvdb' and tvdb_key and 'tvdb' in ids:
+            log.info(f"  - Checking TheTVDB for '{title}'...")
+            provider_result = tvdb_art(tvdb_key, ids['tvdb'], min_poster_w, min_back_w)
+            if not result.poster_url:
+                result.poster_url = provider_result.poster_url
+            if include_backgrounds and not result.background_url:
+                result.background_url = provider_result.background_url
+            if provider_result.poster_url or provider_result.background_url:
                 result.source = provider_result.source
 
         # If we have all the artwork we need, we can stop searching
@@ -508,8 +560,9 @@ def main():
     tmdb_key = os.getenv("TMDB_API_KEY") or get_input("TMDb API Key", saved_config.get("tmdb_key", ""))
     fanart_key = os.getenv("FANART_API_KEY") or get_input("Fanart.tv API Key", saved_config.get("fanart_key", ""))
     omdb_key = os.getenv("OMDB_API_KEY") or get_input("OMDb API Key", saved_config.get("omdb_key", ""))
+    tvdb_key = os.getenv("TVDB_API_KEY") or get_input("TheTVDB API Key", saved_config.get("tvdb_key", ""))
 
-    if not any([tmdb_key, fanart_key, omdb_key]):
+    if not any([tmdb_key, fanart_key, omdb_key, tvdb_key]):
         print("\n⚠ Warning: No API keys provided. Cannot fetch artwork.")
         if not (os.getenv("LIBRARIES") and get_yes_no("Continue anyway?", False)):
             return
@@ -558,6 +611,7 @@ def main():
         "tmdb_key": tmdb_key,
         "fanart_key": fanart_key,
         "omdb_key": omdb_key,
+        "tvdb_key": tvdb_key,
         "include_backgrounds": include_backgrounds,
         "overwrite": overwrite,
         "dry_run": dry_run,
@@ -598,7 +652,7 @@ def main():
                 total_items += 1
                 log.info(f"-> Processing {i + 1}/{item_count}: {item.title}")
                 process_item(
-                    item, tmdb_key, fanart_key, omdb_key,
+                    item, tmdb_key, fanart_key, omdb_key, tvdb_key,
                     include_backgrounds, overwrite, dry_run,
                     DEFAULT_MIN_POSTER_WIDTH, DEFAULT_MIN_BACKGROUND_WIDTH,
                     provider_priority

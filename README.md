@@ -21,12 +21,13 @@ P-Art is configured through environment variables. Here are the available option
 | `TMDB_API_KEY` | Your TMDb API key. | |
 | `FANART_API_KEY` | Your Fanart.tv API key. | |
 | `OMDB_API_KEY` | Your OMDb API key. | |
+| `TVDB_API_KEY` | Your TheTVDB API key. | |
 | `INCLUDE_BACKGROUNDS` | Whether to fetch and add backgrounds. | `true` |
 | `OVERWRITE` | Whether to overwrite existing artwork. | `false` |
 | `DRY_RUN` | If set to `true`, P-Art will only log the changes it would make without actually changing anything. | `true` |
 | `LIBRARIES` | A comma-separated list of libraries to scan. If not set, you will be prompted to select libraries when the script starts. | |
 | `ONLY_MISSING` | If set to `true`, P-art will only look for artwork if its missing | `true` |
-| `PROVIDER_PRIORITY` | A comma-separated list of providers to use, in order of priority. | `tmdb,fanart,omdb` |
+| `PROVIDER_PRIORITY` | A comma-separated list of providers to use, in order of priority. Available providers: `tmdb`, `fanart`, `omdb`, `tvdb`. | `tmdb,fanart,omdb` |
 | `CRON_SCHEDULE` | The cron schedule to run the script on. | `0 2 * * *` |
 
 ### Docker Compose Example
