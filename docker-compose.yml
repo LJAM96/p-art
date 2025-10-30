@@ -1,8 +1,9 @@
 version: '3.8'
 services:
-  p-art-tui:
+  p-art:
     build: .
-    image: your-docker-hub-username/p-art-tui
+    image: ghcr.io/ljam96/p-art:latest
+    container_name: p-art
     environment:
       - PLEX_URL=http://localhost:32400
       - PLEX_TOKEN=
