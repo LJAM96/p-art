@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Approve Changes - P-Art</title>
+    <style>
+        body {
+            font-family: sans-serif;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .change-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        .change-table th, .change-table td {
+            border: 1px solid #ccc;
+            padding: 8px;
+            text-align: left;
+        }
+        .change-table img {
+            max-width: 150px;
+        }
+        .btn {
+            padding: 10px 15px;
+            border: none;
+            background-color: #007bff;
+            color: white;
+            cursor: pointer;
+        }
+        .btn-danger {
+            background-color: #dc3545;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Approve Changes</h1>
+        <form action="/apply_changes" method="post">
+            <table class="change-table">
+                <thead>
+                    <tr>
+                        <th>Title</th>
+                        <th>Current Artwork</th>
+                        <th>New Artwork</th>
+                        <th>Source</th>
+                        <th>Action</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for change in changes %}
+                    <tr>
+                        <td>{{ change.title }}</td>
+                        <td>
+                            {% if change.current_poster %}
+                            <img src="{{ change.current_poster }}" alt="Current Poster">
+                            {% elif change.current_background %}
+                            <img src="{{ change.current_background }}" alt="Current Background">
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if change.new_poster %}
+                            <img src="{{ change.new_poster }}" alt="New Poster">
+                            {% elif change.new_background %}
+                            <img src="{{ change.new_background }}" alt="New Background">
+                            {% endif %}
+                        </td>
+                        <td>{{ change.source }}</td>
+                        <td>
+                            <input type="hidden" name="item_rating_key_{{ loop.index0 }}" value="{{ change.item_rating_key }}">
+                            {% if change.new_poster %}
+                            <input type="hidden" name="new_poster_{{ loop.index0 }}" value="{{ change.new_poster }}">
+                            {% elif change.new_background %}
+                            <input type="hidden" name="new_background_{{ loop.index0 }}" value="{{ change.new_background }}">
+                            {% endif %}
+                            <input type="radio" name="action_{{ loop.index0 }}" value="approve" checked> Approve
+                            <input type="radio" name="action_{{ loop.index0 }}" value="decline"> Decline
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            <br>
+            <button type="submit" class="btn">Apply Approved Changes</button>
+        </form>
+    </div>
+</body>
+</html>

@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>P-Art</title>
+    <style>
+        body {
+            font-family: sans-serif;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .config-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        .config-table th, .config-table td {
+            border: 1px solid #ccc;
+            padding: 8px;
+            text-align: left;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        .form-group label {
+            display: block;
+            margin-bottom: 5px;
+        }
+        .form-group input {
+            width: 100%;
+            padding: 8px;
+            box-sizing: border-box;
+        }
+        .btn {
+            padding: 10px 15px;
+            border: none;
+            background-color: #007bff;
+            color: white;
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>P-Art</h1>
+        <a href="/config" class="btn">Configuration</a>
+        <h2>Run Artwork Update</h2>
+        <form action="/run" method="post">
+            <div class="form-group">
+                <label for="final_approval">Final Approval Mode</label>
+                <input type="checkbox" id="final_approval" name="final_approval" {% if config.final_approval %}checked{% endif %}>
+            </div>
+            <button type="submit" class="btn">Run Now</button>
+        </form>
+
+        <a href="/approve" class="btn">Approve Changes</a>
+
+        <h2>Logs</h2>
+        <div id="logs" style="height: 300px; overflow-y: scroll; border: 1px solid #ccc; padding: 10px;"></div>
+    </div>
+
+    <script>
+        const logs = document.getElementById('logs');
+        const source = new EventSource('/stream');
+        source.onmessage = function(event) {
+            logs.innerHTML += event.data + '<br>';
+            logs.scrollTop = logs.scrollHeight;
+        };
+    </script>
+</body>
+</html>

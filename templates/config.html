@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Configuration - P-Art</title>
+    <style>
+        body {
+            font-family: sans-serif;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        .form-group label {
+            display: block;
+            margin-bottom: 5px;
+        }
+        .form-group input {
+            width: 100%;
+            padding: 8px;
+            box-sizing: border-box;
+        }
+        .btn {
+            padding: 10px 15px;
+            border: none;
+            background-color: #007bff;
+            color: white;
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Configuration</h1>
+        <form action="/config" method="post">
+            {% for key, value in config.items() %}
+            <div class="form-group">
+                <label for="{{ key }}">{{ key }}</label>
+                <input type="text" id="{{ key }}" name="{{ key }}" value="{{ value }}" {% if key.upper() in env_keys %}disabled{% endif %}>
+                {% if key.upper() in env_keys %}
+                <small>This value is set by the {{ key.upper() }} environment variable.</small>
+                {% endif %}
+            </div>
+            {% endfor %}
+            <button type="submit" class="btn">Save Configuration</button>
+        </form>
+    </div>
+</body>
+</html>

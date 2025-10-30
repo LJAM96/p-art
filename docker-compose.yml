@@ -4,6 +4,8 @@ services:
     build: .
     image: ghcr.io/ljam96/p-art:latest
     container_name: p-art
+    ports:
+      - "5000:5000"
     environment:
       - PLEX_URL=http://localhost:32400
       - PLEX_TOKEN=
