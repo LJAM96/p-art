@@ -387,7 +387,7 @@ def select_libraries(plex: PlexServer) -> List:
 
 def process_item(item, tmdb_key: str, fanart_key: str, omdb_key: str,
                  include_backgrounds: bool, overwrite: bool, dry_run: bool,
-                 min_poster_w: int, min_back_w: int):
+                 min_poster_w: int, min_back_w: int, provider_priority: List[str]):
     """Process a single item (movie or show) to fill missing artwork."""
     title = getattr(item, 'title', 'Unknown')
 
@@ -405,33 +405,41 @@ def process_item(item, tmdb_key: str, fanart_key: str, omdb_key: str,
     # Try providers in order
     result = ArtResult()
 
-    # Try TMDb
-    if tmdb_key and ('tmdb' in ids or 'tvdb' in ids):
-        log.info(f"  - Checking TMDb for '{title}'...")
-        movie_id = ids.get('tmdb') if item.type == 'movie' else None
-        tv_id = ids.get('tmdb') if item.type == 'show' else None
-        result = tmdb_art(tmdb_key, movie_id, tv_id, min_poster_w, min_back_w)
+    for provider in provider_priority:
+        if provider == 'tmdb' and tmdb_key and ('tmdb' in ids or 'tvdb' in ids):
+            log.info(f"  - Checking TMDb for '{title}'...")
+            movie_id = ids.get('tmdb') if item.type == 'movie' else None
+            tv_id = ids.get('tmdb') if item.type == 'show' else None
+            provider_result = tmdb_art(tmdb_key, movie_id, tv_id, min_poster_w, min_back_w)
+            if not result.poster_url:
+                result.poster_url = provider_result.poster_url
+            if include_backgrounds and not result.background_url:
+                result.background_url = provider_result.background_url
+            if provider_result.poster_url or provider_result.background_url:
+                result.source = provider_result.source
 
-    # Try Fanart if needed
-    if (not result.poster_url or (include_backgrounds and not result.background_url)) and fanart_key:
-        log.info(f"  - Checking Fanart.tv for '{title}'...")
-        tmdb_id = ids.get('tmdb')
-        tvdb_id = ids.get('tvdb')
-        fanart_result = fanart_art(fanart_key, tmdb_id, tvdb_id, min_poster_w, min_back_w)
-        if not result.poster_url:
-            result.poster_url = fanart_result.poster_url
-        if include_backgrounds and not result.background_url:
-            result.background_url = fanart_result.background_url
-        if fanart_result.poster_url or fanart_result.background_url:
-            result.source = fanart_result.source
+        elif provider == 'fanart' and fanart_key:
+            log.info(f"  - Checking Fanart.tv for '{title}'...")
+            tmdb_id = ids.get('tmdb')
+            tvdb_id = ids.get('tvdb')
+            provider_result = fanart_art(fanart_key, tmdb_id, tvdb_id, min_poster_w, min_back_w)
+            if not result.poster_url:
+                result.poster_url = provider_result.poster_url
+            if include_backgrounds and not result.background_url:
+                result.background_url = provider_result.background_url
+            if provider_result.poster_url or provider_result.background_url:
+                result.source = provider_result.source
 
-    # Try OMDb if still need poster
-    if not result.poster_url and omdb_key and 'imdb' in ids:
-        log.info(f"  - Checking OMDb for '{title}'...")
-        omdb_result = omdb_art(omdb_key, ids['imdb'])
-        if omdb_result.poster_url:
-            result.poster_url = omdb_result.poster_url
-            result.source = omdb_result.source
+        elif provider == 'omdb' and omdb_key and 'imdb' in ids:
+            log.info(f"  - Checking OMDb for '{title}'...")
+            provider_result = omdb_art(omdb_key, ids['imdb'])
+            if provider_result.poster_url:
+                result.poster_url = provider_result.poster_url
+                result.source = provider_result.source
+
+        # If we have all the artwork we need, we can stop searching
+        if result.poster_url and (not include_backgrounds or result.background_url):
+            break
 
     # Apply artwork
     updated = False
@@ -557,12 +565,16 @@ def main():
     config_save(CONFIG_PATH, config_to_save)
     print(f"\n✓ Configuration saved to {CONFIG_PATH}")
 
+    provider_priority_str = os.getenv("PROVIDER_PRIORITY") or "tmdb,fanart,omdb"
+    provider_priority = [p.strip() for p in provider_priority_str.split(',')]
+
     # Step 5: Process
     print("\n[Step 5/5] Processing")
     print(f"Settings:")
     print(f"  - Include backgrounds: {include_backgrounds}")
     print(f"  - Overwrite existing: {overwrite}")
     print(f"  - Dry run: {dry_run}")
+    print(f"  - Provider priority: {provider_priority}")
     print()
 
     if os.getenv("LIBRARIES") or get_yes_no("Start processing?", True):
@@ -588,7 +600,8 @@ def main():
                 process_item(
                     item, tmdb_key, fanart_key, omdb_key,
                     include_backgrounds, overwrite, dry_run,
-                    DEFAULT_MIN_POSTER_WIDTH, DEFAULT_MIN_BACKGROUND_WIDTH
+                    DEFAULT_MIN_POSTER_WIDTH, DEFAULT_MIN_BACKGROUND_WIDTH,
+                    provider_priority
                 )
 
         except Exception as e:
