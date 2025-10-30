@@ -386,7 +386,7 @@ def process_item(item, tmdb_key: str, fanart_key: str, omdb_key: str,
     has_background = bool(getattr(item, 'art', None))
 
     if not overwrite and has_poster and (not include_backgrounds or has_background):
-        log.debug(f"Skipping {title} - already has artwork")
+        log.info(f"  - Skipping '{title}', artwork already present.")
         return
 
     # Get external IDs
@@ -397,12 +397,14 @@ def process_item(item, tmdb_key: str, fanart_key: str, omdb_key: str,
 
     # Try TMDb
     if tmdb_key and ('tmdb' in ids or 'tvdb' in ids):
+        log.info(f"  - Checking TMDb for '{title}'...")
         movie_id = ids.get('tmdb') if item.type == 'movie' else None
         tv_id = ids.get('tmdb') if item.type == 'show' else None
         result = tmdb_art(tmdb_key, movie_id, tv_id, min_poster_w, min_back_w)
 
     # Try Fanart if needed
     if (not result.poster_url or (include_backgrounds and not result.background_url)) and fanart_key:
+        log.info(f"  - Checking Fanart.tv for '{title}'...")
         tmdb_id = ids.get('tmdb')
         tvdb_id = ids.get('tvdb')
         fanart_result = fanart_art(fanart_key, tmdb_id, tvdb_id, min_poster_w, min_back_w)
@@ -415,6 +417,7 @@ def process_item(item, tmdb_key: str, fanart_key: str, omdb_key: str,
 
     # Try OMDb if still need poster
     if not result.poster_url and omdb_key and 'imdb' in ids:
+        log.info(f"  - Checking OMDb for '{title}'...")
         omdb_result = omdb_art(omdb_key, ids['imdb'])
         if omdb_result.poster_url:
             result.poster_url = omdb_result.poster_url
@@ -424,29 +427,29 @@ def process_item(item, tmdb_key: str, fanart_key: str, omdb_key: str,
     updated = False
     if result.poster_url and (overwrite or not has_poster):
         if dry_run:
-            print(f"  [DRY RUN] Would set poster from {result.source}: {title}")
+            log.info(f"  [DRY RUN] Would set poster from {result.source}: {title}")
         else:
             try:
                 item.uploadPoster(url=result.poster_url)
-                print(f"  ✓ Set poster from {result.source}: {title}")
+                log.info(f"  ✓ Set poster from {result.source}: {title}")
                 updated = True
             except Exception as e:
-                print(f"  ✗ Failed to set poster for {title}: {e}")
+                log.info(f"  ✗ Failed to set poster for {title}: {e}")
 
     if include_backgrounds and result.background_url and (overwrite or not has_background):
         if dry_run:
-            print(f"  [DRY RUN] Would set background from {result.source}: {title}")
+            log.info(f"  [DRY RUN] Would set background from {result.source}: {title}")
         else:
             try:
                 item.uploadArt(url=result.background_url)
-                print(f"  ✓ Set background from {result.source}: {title}")
+                log.info(f"  ✓ Set background from {result.source}: {title}")
                 updated = True
             except Exception as e:
-                print(f"  ✗ Failed to set background for {title}: {e}")
+                log.info(f"  ✗ Failed to set background for {title}: {e}")
 
     if not updated and not dry_run:
         if not result.poster_url and not result.background_url:
-            print(f"  - No artwork found for: {title}")
+            log.info(f"  - No artwork found for: {title}")
 
 def main():
     """Main CLI interface."""
@@ -553,18 +556,12 @@ def main():
 
             for i, item in enumerate(items):
                 total_items += 1
-                # Simple progress indicator
-                sys.stdout.write(f"\r  - Processing item {i + 1}/{item_count}...")
-                sys.stdout.flush()
+                log.info(f"-> Processing {i + 1}/{item_count}: {item.title}")
                 process_item(
                     item, tmdb_key, fanart_key, omdb_key,
                     include_backgrounds, overwrite, dry_run,
                     DEFAULT_MIN_POSTER_WIDTH, DEFAULT_MIN_BACKGROUND_WIDTH
                 )
-            
-            # Clear the progress line
-            sys.stdout.write("\r" + " " * 50 + "\r")
-            sys.stdout.flush()
 
         except Exception as e:
             print(f"✗ Error processing library {library.title}: {e}")
