@@ -2,17 +2,26 @@
 
 P-Art is a simple but powerful tool to automatically find and add missing posters and backgrounds to your Plex library. It uses TMDb, Fanart.tv, and OMDb to find the best artwork for your movies and TV shows.
 
-## How it Works
+## Features
 
-P-Art connects to your Plex server, scans your libraries, and for each item that is missing a poster or background, it searches for artwork on the supported providers. It then uploads the best available artwork to your Plex server.
+- **Web UI:** A user-friendly web interface to configure and run the application.
+- **Multiple Providers:** Supports TMDb, Fanart.tv, OMDb, and TheTVDB.
+- **Artwork Types:** Fetches posters and backgrounds.
+- **Final Approval Mode:** Review and approve artwork changes before they are applied.
+- **Language Preference:** Set a preferred language for the artwork.
+- **Dockerized:** Easy to run with Docker.
 
 ## Getting Started
 
 The easiest way to run P-Art is with Docker. You can use the provided `docker-compose.yml` as a starting point.
 
+### Web UI
+
+P-Art now comes with a web UI that allows you to configure the application, trigger artwork updates, and view logs in real-time. By default, the web UI is available at `http://localhost:5000`.
+
 ### Configuration
 
-P-Art is configured through environment variables. Here are the available options:
+P-Art can be configured through the web UI or with environment variables. If an option is set as an environment variable, it will be disabled in the web UI.
 
 | Variable | Description | Default |
 | --- | --- | --- |
@@ -25,19 +34,23 @@ P-Art is configured through environment variables. Here are the available option
 | `INCLUDE_BACKGROUNDS` | Whether to fetch and add backgrounds. | `true` |
 | `OVERWRITE` | Whether to overwrite existing artwork. | `false` |
 | `DRY_RUN` | If set to `true`, P-Art will only log the changes it would make without actually changing anything. | `true` |
-| `LIBRARIES` | A comma-separated list of libraries to scan. If not set, you will be prompted to select libraries when the script starts. | |
-| `ONLY_MISSING` | If set to `true`, P-art will only look for artwork if its missing | `true` |
+| `LIBRARIES` | A comma-separated list of libraries to scan. | `all` |
 | `PROVIDER_PRIORITY` | A comma-separated list of providers to use, in order of priority. Available providers: `tmdb`, `fanart`, `omdb`, `tvdb`. | `tmdb,fanart,omdb` |
-| `CRON_SCHEDULE` | The cron schedule to run the script on. | `0 2 * * *` |
+| `ARTWORK_LANGUAGE` | The preferred language for the artwork (e.g., `en`, `fr`, `de`). | `en` |
+| `FINAL_APPROVAL` | If set to `true`, the application will require manual approval of artwork changes from the web interface. | `false` |
+| `LOG_LEVEL` | The log level for the application. Available levels: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`. | `INFO` |
+| `LOG_FILE` | The path to a log file to write logs to. | |
 
 ### Docker Compose Example
 
 ```yaml
 version: "3.8"
 services:
-  missing-art:
+  p-art:
     image: ghcr.io/ljam96/p-art:latest
-    container_name: missing-art
+    container_name: p-art
+    ports:
+      - "5000:5000"
     environment:
       - PLEX_URL=http://<your-plex-ip>:<your-plex-port>
       - PLEX_TOKEN=<your-plex-token>
@@ -52,3 +65,4 @@ services:
 ## Contributing
 
 Feel free to open an issue or submit a pull request if you have any ideas or suggestions.
+
