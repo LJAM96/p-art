@@ -13,4 +13,6 @@ RUN chmod +x entrypoint.sh
 
 EXPOSE 5000
 
+ENV FLASK_APP=web.py
+
 ENTRYPOINT ["/app/entrypoint.sh"]
