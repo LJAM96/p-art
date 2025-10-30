@@ -7,6 +7,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY p_art.py .
 COPY web.py .
+COPY templates ./templates
 COPY entrypoint.sh .
 
 RUN chmod +x entrypoint.sh
