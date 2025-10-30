@@ -1,5 +1,6 @@
 from flask import Flask, render_template, request, redirect, url_for
 import os
+import threading
 from p_art import PArt
 
 app = Flask(__name__)
@@ -9,11 +10,13 @@ part = PArt()
 def index():
     return render_template('index.html', config=part.config.config)
 
+import threading
+
 @app.route('/run', methods=['POST'])
 def run():
     part.config.set("final_approval", "final_approval" in request.form)
     part.config.save()
-    part.run_web()
+    threading.Thread(target=part.run_web).start()
     return redirect(url_for('index'))
 
 @app.route('/stream')
