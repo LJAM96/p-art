@@ -517,6 +517,10 @@ def main():
         else:
             lib_names = [name.strip() for name in libraries_env.split(',')]
             libraries = [lib for lib in all_libraries if lib.title in lib_names]
+        
+        if not libraries:
+            print(f"Could not find the specified libraries: {libraries_env}. Falling back to manual selection.")
+            libraries = select_libraries(plex)
     else:
         libraries = select_libraries(plex)
 
