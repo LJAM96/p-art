@@ -586,6 +586,50 @@ class PArt:
         if self.tvdb_key:
             self.providers['tvdb'] = TVDbProvider(self, self.tvdb_key)
 
+    def _prepare_library_batches(self):
+        batches = []
+        total_candidates = 0
+        total_work_items = 0
+
+        for library in self.libraries:
+            try:
+                items = library.all()
+            except Exception as e:
+                log.error(f"Error fetching items from {library.title}: {e}")
+                continue
+
+            item_count = len(items)
+            total_candidates += item_count
+            work_items = []
+            missing_posters = 0
+            missing_backgrounds = 0
+
+            for item in items:
+                has_poster = bool(getattr(item, 'thumb', None))
+                has_background = bool(getattr(item, 'art', None))
+
+                if not has_poster:
+                    missing_posters += 1
+                if self.include_backgrounds and not has_background:
+                    missing_backgrounds += 1
+
+                needs_poster = self.overwrite or not has_poster
+                needs_background = self.include_backgrounds and (self.overwrite or not has_background)
+
+                if needs_poster or needs_background:
+                    work_items.append((item, needs_poster, needs_background))
+
+            total_work_items += len(work_items)
+            batches.append({
+                "library": library,
+                "work_items": work_items,
+                "item_count": item_count,
+                "missing_posters": missing_posters,
+                "missing_backgrounds": missing_backgrounds,
+            })
+
+        return batches, total_work_items, total_candidates
+
     def run(self):
         print("=" * 60)
         print("Plex Poster and Background Filler")
@@ -621,29 +665,42 @@ class PArt:
             print("Cancelled.")
             return
 
-        total_items = 0
-        for library in self.libraries:
+        batches, total_work_items, total_candidates = self._prepare_library_batches()
+        print(f"Scanned {total_candidates} items across {len(self.libraries)} libraries.")
+
+        if total_work_items == 0:
+            print("No items require artwork updates.")
+            return
+
+        processed = 0
+        for batch in batches:
+            library = batch["library"]
+            work_items = batch["work_items"]
+            item_count = batch["item_count"]
+            missing_posters = batch["missing_posters"]
+            missing_backgrounds = batch["missing_backgrounds"]
+
             print(f"\n{'=' * 60}")
             print(f"Processing: {library.title}")
             print(f"{'=' * 60}")
+            print(f"Total items: {item_count}")
+            print(f"Missing posters: {missing_posters}")
+            if self.include_backgrounds:
+                print(f"Missing backgrounds: {missing_backgrounds}")
 
-            try:
-                items = library.all()
-                item_count = len(items)
-                print(f"Found {item_count} items\n")
+            if not work_items:
+                print("Nothing to update in this library.")
+                continue
 
-                for i, item in enumerate(items):
-                    total_items += 1
-                    log.info(f"-> Processing {i + 1}/{item_count}: {item.title}")
-                    self._process_item(item)
-
-            except Exception as e:
-                print(f"✗ Error processing library {library.title}: {e}")
+            for i, (item, needs_poster, needs_background) in enumerate(work_items, 1):
+                processed += 1
+                log.info(f"-> Processing {i}/{len(work_items)}: {getattr(item, 'title', 'Unknown')}")
+                self._process_item(item, needs_poster, needs_background)
 
         self.cache.save()
 
         print(f"\n{'=' * 60}")
-        print(f"Processing complete! Processed {total_items} items.")
+        print(f"Processing complete! Updated {processed} items out of {total_candidates} scanned.")
         print(f"Cache saved to: {self.cache.cache_path}")
 
     def run_web(self):
@@ -676,34 +733,41 @@ class PArt:
             if not self.provider_priority:
                 self.provider_priority = list(self.providers.keys())
 
-            library_batches = []
-            total_items = 0
-            for library in self.libraries:
-                try:
-                    items = library.all()
-                    item_count = len(items)
-                    total_items += item_count
-                    library_batches.append((library, items))
-                except Exception as e:
-                    log.error(f"Error fetching items from {library.title}: {e}")
+            batches, total_work_items, total_candidates = self._prepare_library_batches()
+            self._reset_progress(total_work_items)
 
-            self._reset_progress(total_items)
-
-            if total_items == 0:
+            if total_candidates == 0:
                 log.info("No media items found to process.")
+                return
+
+            if total_work_items == 0:
+                log.info("No items require artwork updates.")
                 return
 
             if not self.providers:
                 log.warning("No artwork providers are configured; skipping artwork lookup.")
 
-            for library, items in library_batches:
-                item_count = len(items)
-                log.info(f"Processing: {library.title}")
-                log.info(f"Found {item_count} items")
+            for batch in batches:
+                library = batch["library"]
+                work_items = batch["work_items"]
+                item_count = batch["item_count"]
+                missing_posters = batch["missing_posters"]
+                missing_backgrounds = batch["missing_backgrounds"]
 
-                for i, item in enumerate(items):
-                    log.info(f"-> Processing {i + 1}/{item_count}: {item.title}")
-                    self._process_item(item)
+                summary = f"Total items: {item_count}, missing posters: {missing_posters}"
+                if self.include_backgrounds:
+                    summary += f", missing backgrounds: {missing_backgrounds}"
+
+                log.info(f"Processing: {library.title}")
+                log.info(summary)
+
+                if not work_items:
+                    log.info("Nothing to update in this library.")
+                    continue
+
+                for i, (item, needs_poster, needs_background) in enumerate(work_items, 1):
+                    log.info(f"-> Processing {i}/{len(work_items)}: {getattr(item, 'title', 'Unknown')}")
+                    self._process_item(item, needs_poster, needs_background)
                     self._increment_progress()
 
             self.cache.save()
@@ -778,36 +842,53 @@ class PArt:
 
         print(f"{'=' * 60}")
 
-    def _process_item(self, item):
+    def _process_item(self, item, needs_poster=None, needs_background=None):
         title = getattr(item, 'title', 'Unknown')
 
         has_poster = bool(getattr(item, 'thumb', None))
         has_background = bool(getattr(item, 'art', None))
 
-        if not self.overwrite and has_poster and (not self.include_backgrounds or has_background):
+        if needs_poster is None:
+            needs_poster = self.overwrite or not has_poster
+        if needs_background is None:
+            needs_background = self.include_backgrounds and (self.overwrite or not has_background)
+        elif not self.include_backgrounds:
+            needs_background = False
+
+        if not needs_poster and not needs_background:
             log.info(f"  - Skipping '{title}', artwork already present.")
             return
 
         result = ArtResult()
+        remaining_poster = needs_poster
+        remaining_background = needs_background
 
         for provider_name in self.provider_priority:
-            if provider_name in self.providers:
-                log.info(f"  - Checking {provider_name} for '{title}'...")
-                provider = self.providers[provider_name]
-                provider_result = provider.get_art(item, 600, 1920) # TODO: make min widths configurable
+            if not (remaining_poster or remaining_background):
+                break
+            provider = self.providers.get(provider_name)
+            if not provider:
+                continue
 
+            log.info(f"  - Checking {provider_name} for '{title}'...")
+            provider_result = provider.get_art(item, 600, 1920)  # TODO: make min widths configurable
+
+            if remaining_poster and provider_result.poster_url:
                 if not result.poster_url:
                     result.poster_url = provider_result.poster_url
-                if self.include_backgrounds and not result.background_url:
-                    result.background_url = provider_result.background_url
-                if provider_result.poster_url or provider_result.background_url:
-                    result.source = provider_result.source
+                    if provider_result.source:
+                        result.source = provider_result.source
+                remaining_poster = False
 
-            if result.poster_url and (not self.include_backgrounds or result.background_url):
-                break
+            if remaining_background and provider_result.background_url:
+                if not result.background_url:
+                    result.background_url = provider_result.background_url
+                    if provider_result.source:
+                        result.source = provider_result.source
+                remaining_background = False
 
         if self.final_approval:
-            if result.poster_url and (self.overwrite or not has_poster):
+            if needs_poster and result.poster_url and (self.overwrite or not has_poster):
                 self.proposed_changes.append({
                     "item_rating_key": item.ratingKey,
                     "title": title,
@@ -815,7 +896,7 @@ class PArt:
                     "new_poster": result.poster_url,
                     "source": result.source
                 })
-            if self.include_backgrounds and result.background_url and (self.overwrite or not has_background):
+            if needs_background and result.background_url and (self.overwrite or not has_background):
                 self.proposed_changes.append({
                     "item_rating_key": item.ratingKey,
                     "title": title,
@@ -826,7 +907,7 @@ class PArt:
             return
 
         updated = False
-        if result.poster_url and (self.overwrite or not has_poster):
+        if needs_poster and result.poster_url and (self.overwrite or not has_poster):
             if self.dry_run:
                 log.info(f"  [DRY RUN] Would set poster from {result.source}: {title}")
             else:
@@ -837,7 +918,7 @@ class PArt:
                 except Exception as e:
                     log.info(f"  ✗ Failed to set poster for {title}: {e}")
 
-        if self.include_backgrounds and result.background_url and (self.overwrite or not has_background):
+        if needs_background and result.background_url and (self.overwrite or not has_background):
             if self.dry_run:
                 log.info(f"  [DRY RUN] Would set background from {result.source}: {title}")
             else:
@@ -849,18 +930,22 @@ class PArt:
                     log.info(f"  ✗ Failed to set background for {title}: {e}")
 
         if not updated and not self.dry_run:
-            if not result.poster_url and not result.background_url:
-                log.info(f"  - No artwork found for: {title}")
+            missing_bits = []
+            if needs_poster and not result.poster_url:
+                missing_bits.append("poster")
+            if needs_background and not result.background_url:
+                missing_bits.append("background")
+            if missing_bits:
+                log.info(f"  - No {'/'.join(missing_bits)} found for: {title}")
 
         if updated or (self.dry_run and (result.poster_url or result.background_url)):
             self._change_log.append(ChangeLogEntry(
                 title=title,
-                poster_changed=bool(result.poster_url and (self.overwrite or not has_poster)),
-                background_changed=bool(self.include_backgrounds and result.background_url and (self.overwrite or not has_background)),
+                poster_changed=bool(needs_poster and result.poster_url and (self.overwrite or not has_poster)),
+                background_changed=bool(needs_background and result.background_url and (self.overwrite or not has_background)),
                 source=result.source,
                 dry_run=self.dry_run
             ))
-
     def _get_api_keys(self):
         print("\n[Step 2/5] API Keys")
         print("Enter your API keys (press Enter to skip)")
