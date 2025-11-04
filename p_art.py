@@ -466,6 +466,29 @@ class PArt:
 
         return False
 
+    def _get_existing_poster_candidate(self, item) -> Optional[Tuple[object, Optional[str]]]:
+        try:
+            posters = item.posters()
+        except Exception as exc:
+            log.debug(f"Failed to fetch existing posters for {getattr(item, 'title', 'Unknown')}: {exc}")
+            return None
+
+        if not posters:
+            return None
+
+        unselected = [p for p in posters if not getattr(p, "selected", False)]
+        candidate = unselected[0] if unselected else posters[0]
+
+        poster_url = None
+        key = getattr(candidate, "key", None)
+        if key and self.plex:
+            try:
+                poster_url = self.plex.url(key)
+            except Exception:
+                poster_url = None
+
+        return candidate, poster_url
+
     def _safe_get(self, url, params=None, headers=None) -> Optional[requests.Response]:
         host = self._host_of(url)
         if host in self.limiters:
@@ -884,10 +907,10 @@ class PArt:
         print(f"{'=' * 60}")
 
     def _process_item(self, item, needs_poster=None, needs_background=None):
-        title = getattr(item, 'title', 'Unknown')
+        title = getattr(item, "title", "Unknown")
 
-        raw_has_poster = bool(getattr(item, 'thumb', None))
-        has_background = bool(getattr(item, 'art', None))
+        raw_has_poster = bool(getattr(item, "thumb", None))
+        has_background = bool(getattr(item, "art", None))
 
         generated_poster = False
         if raw_has_poster and self.treat_generated_posters_as_missing:
@@ -907,6 +930,31 @@ class PArt:
             return
 
         result = ArtResult()
+        poster_applied = False
+        background_applied = False
+
+        if needs_poster and not self.final_approval:
+            local_candidate = self._get_existing_poster_candidate(item)
+            if local_candidate:
+                poster_obj, local_url = local_candidate
+                if self.dry_run:
+                    log.info(f"  [DRY RUN] Would select existing Plex poster for: {title}")
+                    poster_applied = True
+                    needs_poster = False
+                else:
+                    try:
+                        item.setPoster(poster=poster_obj)
+                        log.info(f"  \u2713 Selected existing Plex poster for: {title}")
+                        poster_applied = True
+                        needs_poster = False
+                    except Exception as exc:
+                        log.info(f"  \u2717 Failed to select existing Plex poster for {title}: {exc}")
+                if poster_applied:
+                    if local_url and not result.poster_url:
+                        result.poster_url = local_url
+                    if not result.source:
+                        result.source = "plex-library"
+
         remaining_poster = needs_poster
         remaining_background = needs_background
 
@@ -935,7 +983,7 @@ class PArt:
                 remaining_background = False
 
         if self.final_approval:
-            if needs_poster and result.poster_url and (self.overwrite or not has_poster):
+            if needs_poster and result.poster_url and (self.overwrite or not effective_has_poster):
                 self.proposed_changes.append({
                     "item_rating_key": item.ratingKey,
                     "title": title,
@@ -953,29 +1001,31 @@ class PArt:
                 })
             return
 
-        updated = False
-        if needs_poster and result.poster_url and (self.overwrite or not has_poster):
+        if needs_poster and result.poster_url and (self.overwrite or not effective_has_poster):
             if self.dry_run:
                 log.info(f"  [DRY RUN] Would set poster from {result.source}: {title}")
+                poster_applied = True
             else:
                 try:
                     item.uploadPoster(url=result.poster_url)
-                    log.info(f"  ✓ Set poster from {result.source}: {title}")
-                    updated = True
-                except Exception as e:
-                    log.info(f"  ✗ Failed to set poster for {title}: {e}")
+                    log.info(f"  \u2713 Set poster from {result.source}: {title}")
+                    poster_applied = True
+                except Exception as exc:
+                    log.info(f"  \u2717 Failed to set poster for {title}: {exc}")
 
         if needs_background and result.background_url and (self.overwrite or not has_background):
             if self.dry_run:
                 log.info(f"  [DRY RUN] Would set background from {result.source}: {title}")
+                background_applied = True
             else:
                 try:
                     item.uploadArt(url=result.background_url)
-                    log.info(f"  ✓ Set background from {result.source}: {title}")
-                    updated = True
-                except Exception as e:
-                    log.info(f"  ✗ Failed to set background for {title}: {e}")
+                    log.info(f"  \u2713 Set background from {result.source}: {title}")
+                    background_applied = True
+                except Exception as exc:
+                    log.info(f"  \u2717 Failed to set background for {title}: {exc}")
 
+        updated = poster_applied or background_applied
         if not updated and not self.dry_run:
             missing_bits = []
             if needs_poster and not result.poster_url:
@@ -985,11 +1035,11 @@ class PArt:
             if missing_bits:
                 log.info(f"  - No {'/'.join(missing_bits)} found for: {title}")
 
-        if updated or (self.dry_run and (result.poster_url or result.background_url)):
+        if updated:
             self._change_log.append(ChangeLogEntry(
                 title=title,
-            poster_changed=bool(needs_poster and result.poster_url and (self.overwrite or not effective_has_poster)),
-            background_changed=bool(needs_background and result.background_url and (self.overwrite or not has_background)),
+                poster_changed=poster_applied,
+                background_changed=background_applied,
                 source=result.source,
                 dry_run=self.dry_run
             ))

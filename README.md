@@ -7,7 +7,7 @@ P-Art is a simple but powerful tool to automatically find and add missing poster
 - **Web UI:** A user-friendly web interface to configure and run the application.
 - **Multiple Providers:** Supports TMDb, Fanart.tv, OMDb, and TheTVDB.
 - **Artwork Types:** Fetches posters and backgrounds.
-- **Smart Scanning:** Only queries providers for media that truly needs artwork, with optional detection of Plex-generated frame posters.
+- **Smart Scanning:** Only queries providers for media that truly needs artwork, reusing Plex-provided choices when available and optionally detecting frame-grab posters.
 - **Final Approval Mode:** Review and approve artwork changes before they are applied.
 - **Language Preference:** Set a preferred language for the artwork.
 - **Dockerized:** Easy to run with Docker.
