@@ -6,6 +6,9 @@ services:
     container_name: p-art
     ports:
       - "5000:5000"
+    # Note: P-Art automatically checks for uploaded artwork in Plex before
+    # querying external APIs. Upload custom posters via Plex's "Edit Info"
+    # and P-Art will find and use them automatically (saves API calls!).
     environment:
       # Plex Configuration
       PLEX_URL: "http://localhost:32400"

@@ -7,6 +7,7 @@ P-Art is a simple but powerful tool to automatically find and add missing poster
 - **Web UI:** A user-friendly web interface to configure and run the application.
 - **Multiple Providers:** Supports TMDb, Fanart.tv, OMDb, and TheTVDB with automatic failover.
 - **Smart Scanning:** Only queries providers for media that truly needs artwork, reusing Plex-provided choices when available.
+- **Uploaded Artwork Priority:** Automatically checks and uses already-uploaded posters/backgrounds from Plex before querying external APIs.
 - **Generated Poster Detection:** Optionally detects and replaces Plex's auto-generated frame-grab posters.
 - **Provider Cooldowns:** Automatically disables providers for 12 hours when authentication fails (prevents retry spam).
 - **Artwork Types:** Fetches both posters and backgrounds/art.
@@ -110,6 +111,55 @@ services:
     restart: unless-stopped
 ```
 
+## How It Works
+
+### Artwork Priority
+
+P-Art uses a smart priority system to find the best artwork for your media:
+
+1. **Check Uploaded Artwork First**
+   - Checks if you've already uploaded posters/backgrounds to Plex (via "Edit Info" screen)
+   - If found but not selected, P-Art will select them automatically
+   - Saves API calls and uses your custom artwork preferences
+   - Works with both `final_approval` modes
+
+2. **Query External Providers**
+   - If no uploaded artwork is found, queries providers in priority order
+   - Default priority: TMDb → Fanart.tv → OMDb → TheTVDB
+   - Stops when suitable artwork is found
+   - Providers with authentication errors are automatically disabled for 12 hours
+
+3. **Apply or Queue for Approval**
+   - With `final_approval=false`: Changes applied immediately (or logged in dry_run)
+   - With `final_approval=true`: All changes queued for review at `/approve` page
+
+### Example Flow
+
+```
+Item: "Inception" (no poster currently set)
+├─ Step 1: Check Plex for uploaded posters
+│  ├─ Found 3 uploaded posters → Select first unselected one ✓
+│  └─ Apply/Queue: "plex_uploaded"
+│
+├─ Step 2: (Skipped - poster found in Step 1)
+│
+└─ Done!
+```
+
+```
+Item: "Obscure Documentary" (no poster, nothing uploaded)
+├─ Step 1: Check Plex for uploaded posters
+│  └─ None found
+│
+├─ Step 2: Query TMDb → Not found
+├─ Step 3: Query Fanart.tv → Not found  
+├─ Step 4: Query OMDb → 401 error (disabled for 12 hours)
+├─ Step 5: Query TheTVDB → Found! ✓
+│  └─ Apply/Queue: "tvdb"
+│
+└─ Done!
+```
+
 ## Usage Tips
 
 ### First Run
@@ -146,6 +196,32 @@ TREAT_GENERATED_POSTERS_AS_MISSING: "true"
 OVERWRITE: "true"
 FINAL_APPROVAL: "true"  # Review before applying
 ```
+
+### Using Uploaded Artwork
+
+**P-Art automatically prioritizes artwork you've already uploaded to Plex:**
+
+1. Upload custom posters in Plex:
+   - Go to item → Edit → Posters tab
+   - Upload your custom poster
+   - Don't select it yet (or P-Art will skip the item)
+
+2. Run P-Art:
+   - P-Art finds the uploaded poster
+   - Selects it automatically
+   - No external API calls needed!
+
+3. Works for backgrounds too:
+   - Upload via Edit → Backgrounds tab
+   - P-Art will find and use them
+
+**Benefits:**
+- Use custom/fan-made artwork
+- No API key limits consumed
+- Faster processing (no network calls)
+- Works with final approval mode
+
+**Note:** This is automatic behavior and cannot be disabled. If you want to fetch from external APIs instead, ensure no artwork is uploaded to the item in Plex.
 
 ### Provider Cooldowns
 If a provider returns a 401 (Unauthorized) error:
