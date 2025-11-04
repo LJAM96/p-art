@@ -7,18 +7,34 @@ services:
     ports:
       - "5000:5000"
     environment:
+      # Plex Configuration
       PLEX_URL: "http://localhost:32400"
       PLEX_TOKEN: ""
+      
+      # API Keys
       TMDB_API_KEY: ""
       FANART_API_KEY: ""
       OMDB_API_KEY: ""
       TVDB_API_KEY: ""
+      
+      # Library Settings
       LIBRARIES: "all"
+      
+      # Processing Options
       INCLUDE_BACKGROUNDS: "true"
       OVERWRITE: "false"
       ONLY_MISSING: "true"
       DRY_RUN: "true"
+      FINAL_APPROVAL: "false"
+      
+      # Provider Settings
       PROVIDER_PRIORITY: "tmdb,fanart,omdb,tvdb"
       ARTWORK_LANGUAGE: "en"
       TREAT_GENERATED_POSTERS_AS_MISSING: "false"
+      
+      # Logging (optional)
+      #LOG_LEVEL: "INFO"
+      #LOG_FILE: "/var/log/p-art.log"
+      
+      # Scheduling (optional)
       #CRON_SCHEDULE: "0 2 * * *"
