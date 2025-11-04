@@ -7,14 +7,17 @@ services:
     ports:
       - "5000:5000"
     environment:
-      - PLEX_URL=http://localhost:32400
-      - PLEX_TOKEN=
-      - TMDB_API_KEY=
-      - FANART_API_KEY=
-      - OMDB_API_KEY=
-      - INCLUDE_BACKGROUNDS=true
-      - OVERWRITE=false
-      - DRY_RUN=true
-      - LIBRARIES=all
-      - ONLY_MISSING=true
-      - CRON_SCHEDULE=0 2 * * *
+      PLEX_URL: "http://localhost:32400"
+      PLEX_TOKEN: ""
+      TMDB_API_KEY: ""
+      FANART_API_KEY: ""
+      OMDB_API_KEY: ""
+      TVDB_API_KEY: ""
+      LIBRARIES: "all"
+      INCLUDE_BACKGROUNDS: "true"
+      OVERWRITE: "false"
+      ONLY_MISSING: "true"
+      DRY_RUN: "true"
+      PROVIDER_PRIORITY: "tmdb,fanart,omdb,tvdb"
+      ARTWORK_LANGUAGE: "en"
+      #CRON_SCHEDULE: "0 2 * * *"

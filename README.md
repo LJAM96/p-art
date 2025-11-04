@@ -33,8 +33,9 @@ P-Art can be configured through the web UI or with environment variables. If an 
 | `TVDB_API_KEY` | Your TheTVDB API key. | |
 | `INCLUDE_BACKGROUNDS` | Whether to fetch and add backgrounds. | `true` |
 | `OVERWRITE` | Whether to overwrite existing artwork. | `false` |
+| `ONLY_MISSING` | If set to `true`, only items without artwork will be processed (overrides `OVERWRITE`). | `false` |
 | `DRY_RUN` | If set to `true`, P-Art will only log the changes it would make without actually changing anything. | `true` |
-| `LIBRARIES` | A comma-separated list of libraries to scan. | `all` |
+| `LIBRARIES` | A comma-separated list of libraries to scan (e.g., `Movies,TV Shows`). Set to `all` to scan all libraries. | `all` |
 | `PROVIDER_PRIORITY` | A comma-separated list of providers to use, in order of priority. Available providers: `tmdb`, `fanart`, `omdb`, `tvdb`. | `tmdb,fanart,omdb` |
 | `ARTWORK_LANGUAGE` | The preferred language for the artwork (e.g., `en`, `fr`, `de`). | `en` |
 | `FINAL_APPROVAL` | If set to `true`, the application will require manual approval of artwork changes from the web interface. | `false` |
@@ -52,13 +53,19 @@ services:
     ports:
       - "5000:5000"
     environment:
-      - PLEX_URL=http://<your-plex-ip>:<your-plex-port>
-      - PLEX_TOKEN=<your-plex-token>
-      - TMDB_API_KEY=<your-tmdb-api-key>
-      - FANART_API_KEY=<your-fanart-api-key>
-      - OMDB_API_KEY=<your-omdb-api-key>
-      - LIBRARIES=Movies, TV Shows
-      - DRY_RUN=false
+      PLEX_URL: "http://<your-plex-ip>:<your-plex-port>"
+      PLEX_TOKEN: "<your-plex-token>"
+      TMDB_API_KEY: "<your-tmdb-api-key>"
+      FANART_API_KEY: "<your-fanart-api-key>"
+      OMDB_API_KEY: "<your-omdb-api-key>"
+      TVDB_API_KEY: "<your-tvdb-api-key>"
+      LIBRARIES: "Movies,TV Shows"
+      INCLUDE_BACKGROUNDS: "true"
+      OVERWRITE: "false"
+      ONLY_MISSING: "true"
+      DRY_RUN: "false"
+      PROVIDER_PRIORITY: "tmdb,fanart,omdb,tvdb"
+      ARTWORK_LANGUAGE: "en"
     restart: unless-stopped
 ```
 

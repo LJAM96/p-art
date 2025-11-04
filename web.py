@@ -10,13 +10,41 @@ part = PArt()
 
 def _build_config_items():
     items = []
+    # Map config keys to their environment variable names
+    env_var_map = {
+        "plex_url": "PLEX_URL",
+        "plex_token": "PLEX_TOKEN",
+        "libraries": "LIBRARIES",
+        "tmdb_key": "TMDB_API_KEY",
+        "fanart_key": "FANART_API_KEY",
+        "omdb_key": "OMDB_API_KEY",
+        "tvdb_key": "TVDB_API_KEY",
+        "include_backgrounds": "INCLUDE_BACKGROUNDS",
+        "overwrite": "OVERWRITE",
+        "dry_run": "DRY_RUN",
+        "artwork_language": "ARTWORK_LANGUAGE",
+        "provider_priority": "PROVIDER_PRIORITY",
+        "final_approval": "FINAL_APPROVAL",
+    }
+    
     for key in PArt.CONFIG_DEFAULTS.keys():
-        value = part.config.get(key, PArt.CONFIG_DEFAULTS[key])
+        env_var = env_var_map.get(key, key.upper())
+        env_value = os.getenv(env_var)
+        
+        # Use environment variable value if available, otherwise use config
+        if env_value is not None:
+            if key in PArt.BOOL_KEYS:
+                value = env_value.lower() in ('true', '1', 'y', 'yes')
+            else:
+                value = env_value
+        else:
+            value = part.config.get(key, PArt.CONFIG_DEFAULTS[key])
+        
         items.append({
             "key": key,
             "value": value,
             "is_bool": key in PArt.BOOL_KEYS,
-            "disabled": key.upper() in os.environ,
+            "disabled": env_value is not None,
         })
     return items
 
@@ -69,8 +97,27 @@ def apply_changes():
 @app.route('/config', methods=['GET', 'POST'])
 def config():
     if request.method == 'POST':
+        # Map config keys to their environment variable names
+        env_var_map = {
+            "plex_url": "PLEX_URL",
+            "plex_token": "PLEX_TOKEN",
+            "libraries": "LIBRARIES",
+            "tmdb_key": "TMDB_API_KEY",
+            "fanart_key": "FANART_API_KEY",
+            "omdb_key": "OMDB_API_KEY",
+            "tvdb_key": "TVDB_API_KEY",
+            "include_backgrounds": "INCLUDE_BACKGROUNDS",
+            "overwrite": "OVERWRITE",
+            "dry_run": "DRY_RUN",
+            "artwork_language": "ARTWORK_LANGUAGE",
+            "provider_priority": "PROVIDER_PRIORITY",
+            "final_approval": "FINAL_APPROVAL",
+        }
+        
         for key in PArt.CONFIG_DEFAULTS.keys():
-            if os.getenv(key.upper()):
+            env_var = env_var_map.get(key, key.upper())
+            # Skip if managed by environment variable
+            if os.getenv(env_var):
                 continue
             if key in PArt.BOOL_KEYS:
                 part.config.set(key, key in request.form)

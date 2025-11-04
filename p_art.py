@@ -571,7 +571,7 @@ class PArt:
             self._get_processing_options_from_config()
             self._get_providers()
 
-            provider_priority_str = self.config.get("provider_priority", "tmdb,fanart,omdb")
+            provider_priority_str = os.getenv("PROVIDER_PRIORITY") or self.config.get("provider_priority", "tmdb,fanart,omdb")
             self.provider_priority = [p.strip() for p in provider_priority_str.split(',') if p.strip()]
             if not self.provider_priority:
                 self.provider_priority = list(self.providers.keys())
@@ -613,13 +613,13 @@ class PArt:
             self._set_status("idle")
 
     def _get_api_keys_from_config(self):
-        self.tmdb_key = self.config.get("tmdb_key", "")
-        self.fanart_key = self.config.get("fanart_key", "")
-        self.omdb_key = self.config.get("omdb_key", "")
-        self.tvdb_key = self.config.get("tvdb_key", "")
+        self.tmdb_key = os.getenv("TMDB_API_KEY") or self.config.get("tmdb_key", "")
+        self.fanart_key = os.getenv("FANART_API_KEY") or self.config.get("fanart_key", "")
+        self.omdb_key = os.getenv("OMDB_API_KEY") or self.config.get("omdb_key", "")
+        self.tvdb_key = os.getenv("TVDB_API_KEY") or self.config.get("tvdb_key", "")
 
     def _get_libraries_from_config(self):
-        libraries_env = self.config.get("libraries", "all")
+        libraries_env = os.getenv("LIBRARIES") or self.config.get("libraries", "all")
         all_libraries = self.plex.library.sections()
         if libraries_env.lower() == 'all':
             self.libraries = [lib for lib in all_libraries if lib.type in ('movie', 'show')]
@@ -634,10 +634,20 @@ class PArt:
             log.error("No matching Plex libraries were resolved from configuration.")
 
     def _get_processing_options_from_config(self):
-        self.include_backgrounds = self.config.get("include_backgrounds", True)
-        self.overwrite = self.config.get("overwrite", False)
-        self.dry_run = self.config.get("dry_run", True)
-        self.artwork_language = self.config.get("artwork_language", "en")
+        include_backgrounds_env = os.getenv("INCLUDE_BACKGROUNDS")
+        self.include_backgrounds = include_backgrounds_env.lower() in ('true', '1', 'y', 'yes') if include_backgrounds_env else self.config.get("include_backgrounds", True)
+        
+        only_missing_env = os.getenv("ONLY_MISSING")
+        if only_missing_env and only_missing_env.lower() in ('true', '1', 'y', 'yes'):
+            self.overwrite = False
+        else:
+            overwrite_env = os.getenv("OVERWRITE")
+            self.overwrite = overwrite_env.lower() in ('true', '1', 'y', 'yes') if overwrite_env else self.config.get("overwrite", False)
+        
+        dry_run_env = os.getenv("DRY_RUN")
+        self.dry_run = dry_run_env.lower() in ('true', '1', 'y', 'yes') if dry_run_env else self.config.get("dry_run", True)
+        
+        self.artwork_language = os.getenv("ARTWORK_LANGUAGE") or self.config.get("artwork_language", "en")
         self.final_approval = self.config.get("final_approval", False)
 
     def apply_change(self, item_rating_key: str, new_poster: Optional[str], new_background: Optional[str]):
