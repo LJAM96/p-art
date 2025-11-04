@@ -451,8 +451,10 @@ class PArt:
                             pass
                         self._set_provider_cooldown("omdb", retry_after_hint, error_detail or f"HTTP {r.status_code}")
                         return None
-                    if r.status_code == 401 and "invalid" in lower:
-                        log.error("OMDb API key rejected: Invalid API key.")
+                    if r.status_code == 401:
+                        detail = error_detail or f"HTTP {r.status_code}"
+                        self._set_provider_cooldown("omdb", 12 * 3600, detail)
+                        log.error(f"OMDb provider unauthorized; further requests disabled for this run. Detail: {detail}")
                         return None
                 retry_after = 0
                 if r and r.status_code in (429, 500, 502, 503, 504):
