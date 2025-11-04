@@ -1,51 +1,74 @@
-from flask import Flask, render_template, request, redirect, url_for
-import os
-import threading
+from flask import (
+    Flask,
+    Response,
+    jsonify,
+    redirect,
+    render_template,
+    request,
+    stream_with_context,
+    url_for,
+)
 import json
+import os
+import queue
+import threading
+import time
+
+from health_checks import run_checks
 from p_art import PArt
 
 app = Flask(__name__)
 part = PArt()
 
+ENV_VAR_MAP = {
+    "plex_url": "PLEX_URL",
+    "plex_token": "PLEX_TOKEN",
+    "libraries": "LIBRARIES",
+    "tmdb_key": "TMDB_API_KEY",
+    "fanart_key": "FANART_API_KEY",
+    "omdb_key": "OMDB_API_KEY",
+    "tvdb_key": "TVDB_API_KEY",
+    "include_backgrounds": "INCLUDE_BACKGROUNDS",
+    "overwrite": "OVERWRITE",
+    "dry_run": "DRY_RUN",
+    "artwork_language": "ARTWORK_LANGUAGE",
+    "provider_priority": "PROVIDER_PRIORITY",
+    "final_approval": "FINAL_APPROVAL",
+}
+
+FIELD_HEALTH_MAP = {
+    "plex_url": "plex",
+    "plex_token": "plex",
+    "tmdb_key": "tmdb",
+    "fanart_key": "fanart",
+    "omdb_key": "omdb",
+    "tvdb_key": "tvdb",
+}
+
 
 def _build_config_items():
     items = []
-    # Map config keys to their environment variable names
-    env_var_map = {
-        "plex_url": "PLEX_URL",
-        "plex_token": "PLEX_TOKEN",
-        "libraries": "LIBRARIES",
-        "tmdb_key": "TMDB_API_KEY",
-        "fanart_key": "FANART_API_KEY",
-        "omdb_key": "OMDB_API_KEY",
-        "tvdb_key": "TVDB_API_KEY",
-        "include_backgrounds": "INCLUDE_BACKGROUNDS",
-        "overwrite": "OVERWRITE",
-        "dry_run": "DRY_RUN",
-        "artwork_language": "ARTWORK_LANGUAGE",
-        "provider_priority": "PROVIDER_PRIORITY",
-        "final_approval": "FINAL_APPROVAL",
-    }
-    
     for key in PArt.CONFIG_DEFAULTS.keys():
-        env_var = env_var_map.get(key, key.upper())
+        env_var = ENV_VAR_MAP.get(key, key.upper())
         env_value = os.getenv(env_var)
-        
-        # Use environment variable value if available, otherwise use config
+
         if env_value is not None:
             if key in PArt.BOOL_KEYS:
-                value = env_value.lower() in ('true', '1', 'y', 'yes')
+                value = env_value.lower() in ("true", "1", "y", "yes")
             else:
                 value = env_value
         else:
             value = part.config.get(key, PArt.CONFIG_DEFAULTS[key])
-        
-        items.append({
-            "key": key,
-            "value": value,
-            "is_bool": key in PArt.BOOL_KEYS,
-            "disabled": env_value is not None,
-        })
+
+        items.append(
+            {
+                "key": key,
+                "value": value,
+                "is_bool": key in PArt.BOOL_KEYS,
+                "disabled": env_value is not None,
+                "health_key": FIELD_HEALTH_MAP.get(key),
+            }
+        )
     return items
 
 
@@ -70,13 +93,39 @@ def run():
 
 @app.route('/stream')
 def stream():
+    heartbeat_interval = 15
+
     def generate():
+        next_heartbeat = time.time() + heartbeat_interval
+
         for payload in part.get_recent_events():
             yield f"data: {json.dumps(payload)}\n\n"
+
         while True:
-            payload = part.event_queue.get()
-            yield f"data: {json.dumps(payload)}\n\n"
-    return app.response_class(generate(), mimetype='text/event-stream')
+            timeout = max(0, next_heartbeat - time.time())
+            try:
+                payload = part.event_queue.get(timeout=timeout)
+                yield f"data: {json.dumps(payload)}\n\n"
+                next_heartbeat = time.time() + heartbeat_interval
+            except queue.Empty:
+                yield 'data: {"type":"ping"}\n\n'
+                next_heartbeat = time.time() + heartbeat_interval
+
+    headers = {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+    }
+    return Response(
+        stream_with_context(generate()),
+        headers=headers,
+        mimetype="text/event-stream",
+    )
+
+
+@app.route('/health')
+def health():
+    return jsonify(run_checks())
 
 @app.route('/approve')
 def approve():
@@ -97,25 +146,8 @@ def apply_changes():
 @app.route('/config', methods=['GET', 'POST'])
 def config():
     if request.method == 'POST':
-        # Map config keys to their environment variable names
-        env_var_map = {
-            "plex_url": "PLEX_URL",
-            "plex_token": "PLEX_TOKEN",
-            "libraries": "LIBRARIES",
-            "tmdb_key": "TMDB_API_KEY",
-            "fanart_key": "FANART_API_KEY",
-            "omdb_key": "OMDB_API_KEY",
-            "tvdb_key": "TVDB_API_KEY",
-            "include_backgrounds": "INCLUDE_BACKGROUNDS",
-            "overwrite": "OVERWRITE",
-            "dry_run": "DRY_RUN",
-            "artwork_language": "ARTWORK_LANGUAGE",
-            "provider_priority": "PROVIDER_PRIORITY",
-            "final_approval": "FINAL_APPROVAL",
-        }
-        
         for key in PArt.CONFIG_DEFAULTS.keys():
-            env_var = env_var_map.get(key, key.upper())
+            env_var = ENV_VAR_MAP.get(key, key.upper())
             # Skip if managed by environment variable
             if os.getenv(env_var):
                 continue
@@ -126,7 +158,12 @@ def config():
         part.config.save()
         return redirect(url_for('config'))
 
-    return render_template('config.html', config_items=_build_config_items())
+    health_status = run_checks()
+    return render_template(
+        'config.html',
+        config_items=_build_config_items(),
+        health_status=health_status,
+    )
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0')

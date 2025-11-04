@@ -229,9 +229,23 @@ class FanartProvider(Provider):
 
 
 class OMDbProvider(Provider):
+    def __init__(self, part, api_key: Optional[str]):
+        super().__init__(part, api_key)
+        self._cooldown_notified = False
+
     def get_art(self, item, min_poster_w: int, min_back_w: int) -> ArtResult:
         if not self.api_key:
             return ArtResult()
+
+        on_cooldown, reason, remaining = self.part._provider_on_cooldown("omdb")
+        if on_cooldown:
+            if not self._cooldown_notified:
+                minutes = max(1, int(remaining // 60) or 1)
+                detail = f" ({reason})" if reason else ""
+                log.info(f"OMDb provider on cooldown{detail}. Skipping for about {minutes} minute(s).")
+                self._cooldown_notified = True
+            return ArtResult()
+        self._cooldown_notified = False
 
         ids = self.part._resolve_external_ids(item)
         imdb_id = ids.get('imdb')
@@ -340,6 +354,8 @@ class PArt:
         self._event_queue = queue.Queue()
         self._event_buffer = deque(maxlen=200)
         self._event_lock = threading.Lock()
+        self._cooldown_lock = threading.Lock()
+        self._provider_cooldowns: Dict[str, Tuple[float, Optional[str]]] = {}
         self.web_log_handler = WebLogHandler(self._enqueue_event)
         log.addHandler(self.web_log_handler)
         self.event_queue = self._event_queue
@@ -379,6 +395,31 @@ class PArt:
     def _set_status(self, state: str):
         self._enqueue_event({"type": "status", "state": state})
 
+    def _set_provider_cooldown(self, provider: str, seconds: float, reason: Optional[str] = None):
+        if seconds <= 0:
+            return
+        cooldown_until = time.time() + seconds
+        with self._cooldown_lock:
+            current = self._provider_cooldowns.get(provider)
+            if current and current[0] >= cooldown_until:
+                return
+            self._provider_cooldowns[provider] = (cooldown_until, reason)
+        minutes = max(1, int(seconds // 60) or 1)
+        detail = f": {reason}" if reason else ""
+        log.warning(f"{provider.upper()} provider rate limited{detail}. Cooling down for about {minutes} minute(s).")
+
+    def _provider_on_cooldown(self, provider: str) -> Tuple[bool, Optional[str], float]:
+        with self._cooldown_lock:
+            info = self._provider_cooldowns.get(provider)
+            if not info:
+                return False, None, 0.0
+            until, reason = info
+            remaining = until - time.time()
+            if remaining <= 0:
+                self._provider_cooldowns.pop(provider, None)
+                return False, None, 0.0
+        return True, reason, max(0.0, remaining)
+
     def _host_of(self, url: str) -> str:
         return urlparse(url).netloc
 
@@ -393,6 +434,26 @@ class PArt:
                 log.debug(f"Response: {r.status_code}")
                 if r and r.status_code == 200:
                     return r
+                if r and host == "www.omdbapi.com":
+                    error_detail = ""
+                    try:
+                        payload = r.json()
+                        error_detail = payload.get("Error") or payload.get("error") or ""
+                    except ValueError:
+                        if r.text:
+                            error_detail = r.text.strip()[:200]
+                    lower = error_detail.lower()
+                    if r.status_code == 429 or ("limit" in lower and ("rate" in lower or "request" in lower)):
+                        retry_after_hint = 30 * 60  # default cooldown 30 minutes
+                        try:
+                            retry_after_hint = int(r.headers.get("Retry-After", retry_after_hint))
+                        except (TypeError, ValueError):
+                            pass
+                        self._set_provider_cooldown("omdb", retry_after_hint, error_detail or f"HTTP {r.status_code}")
+                        return None
+                    if r.status_code == 401 and "invalid" in lower:
+                        log.error("OMDb API key rejected: Invalid API key.")
+                        return None
                 retry_after = 0
                 if r and r.status_code in (429, 500, 502, 503, 504):
                     try:
