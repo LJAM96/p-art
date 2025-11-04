@@ -56,13 +56,16 @@ def approve():
 
 @app.route('/apply_changes', methods=['POST'])
 def apply_changes():
-    for i in range(len(part.proposed_changes)):
+    for i, change in enumerate(part.proposed_changes):
         action = request.form.get(f'action_{i}')
         if action == 'approve':
             item_rating_key = request.form.get(f'item_rating_key_{i}')
             new_poster = request.form.get(f'new_poster_{i}')
             new_background = request.form.get(f'new_background_{i}')
-            part.apply_change(item_rating_key, new_poster, new_background)
+            uploaded_poster_obj = change.get('uploaded_poster_obj')
+            uploaded_art_obj = change.get('uploaded_art_obj')
+            part.apply_change(item_rating_key, new_poster, new_background, 
+                            uploaded_poster_obj, uploaded_art_obj)
     part.proposed_changes = []
     return redirect(url_for('approve'))
 

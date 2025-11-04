@@ -7,6 +7,8 @@ P-Art is a simple but powerful tool to automatically find and add missing poster
 - **Web UI:** A user-friendly web interface to configure and run the application.
 - **Multiple Providers:** Supports TMDb, Fanart.tv, OMDb, and TheTVDB.
 - **Artwork Types:** Fetches posters and backgrounds.
+- **Use Uploaded Posters:** Automatically uses already-uploaded posters from Plex before fetching from external APIs.
+- **Provider Cooldown:** Automatically disables providers for 12 hours when authentication fails (401 errors).
 - **Final Approval Mode:** Review and approve artwork changes before they are applied.
 - **Language Preference:** Set a preferred language for the artwork.
 - **Dockerized:** Easy to run with Docker.
@@ -34,6 +36,7 @@ P-Art can be configured through the web UI or with environment variables. If an 
 | `INCLUDE_BACKGROUNDS` | Whether to fetch and add backgrounds. | `true` |
 | `OVERWRITE` | Whether to overwrite existing artwork. | `false` |
 | `DRY_RUN` | If set to `true`, P-Art will only log the changes it would make without actually changing anything. | `true` |
+| `USE_UPLOADED_POSTERS` | If set to `true`, P-Art will check for and use already-uploaded posters from Plex before fetching from external APIs. | `true` |
 | `LIBRARIES` | A comma-separated list of libraries to scan. | `all` |
 | `PROVIDER_PRIORITY` | A comma-separated list of providers to use, in order of priority. Available providers: `tmdb`, `fanart`, `omdb`, `tvdb`. | `tmdb,fanart,omdb` |
 | `ARTWORK_LANGUAGE` | The preferred language for the artwork (e.g., `en`, `fr`, `de`). | `en` |
