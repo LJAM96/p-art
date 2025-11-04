@@ -7,6 +7,7 @@ P-Art is a simple but powerful tool to automatically find and add missing poster
 - **Web UI:** A user-friendly web interface to configure and run the application.
 - **Multiple Providers:** Supports TMDb, Fanart.tv, OMDb, and TheTVDB.
 - **Artwork Types:** Fetches posters and backgrounds.
+- **Smart Scanning:** Only queries providers for media that truly needs artwork, with optional detection of Plex-generated frame posters.
 - **Final Approval Mode:** Review and approve artwork changes before they are applied.
 - **Language Preference:** Set a preferred language for the artwork.
 - **Dockerized:** Easy to run with Docker.
@@ -39,6 +40,7 @@ P-Art can be configured through the web UI or with environment variables. If an 
 | `PROVIDER_PRIORITY` | A comma-separated list of providers to use, in order of priority. Available providers: `tmdb`, `fanart`, `omdb`, `tvdb`. | `tmdb,fanart,omdb` |
 | `ARTWORK_LANGUAGE` | The preferred language for the artwork (e.g., `en`, `fr`, `de`). | `en` |
 | `FINAL_APPROVAL` | If set to `true`, the application will require manual approval of artwork changes from the web interface. | `false` |
+| `TREAT_GENERATED_POSTERS_AS_MISSING` | Treat Plex auto-generated frame grabs as missing posters so proper artwork is fetched. | `false` |
 | `LOG_LEVEL` | The log level for the application. Available levels: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`. | `INFO` |
 | `LOG_FILE` | The path to a log file to write logs to. | |
 
@@ -66,6 +68,7 @@ services:
       DRY_RUN: "false"
       PROVIDER_PRIORITY: "tmdb,fanart,omdb,tvdb"
       ARTWORK_LANGUAGE: "en"
+      TREAT_GENERATED_POSTERS_AS_MISSING: "false"
     restart: unless-stopped
 ```
 

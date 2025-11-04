@@ -20,4 +20,5 @@ services:
       DRY_RUN: "true"
       PROVIDER_PRIORITY: "tmdb,fanart,omdb,tvdb"
       ARTWORK_LANGUAGE: "en"
+      TREAT_GENERATED_POSTERS_AS_MISSING: "false"
       #CRON_SCHEDULE: "0 2 * * *"
