@@ -88,7 +88,7 @@
         }
 
         updateProgress(initialProgress.completed, initialProgress.total);
-        setStatus({{ "'running'" if is_running else "'idle'" }});
+        setStatus({{ ('running' if is_running else 'idle') | tojson }});
 
         const source = new EventSource('/stream');
         source.onmessage = function(event) {

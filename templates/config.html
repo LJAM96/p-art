@@ -19,12 +19,36 @@
     </nav>
 
     <div class="container mt-4">
-        <h1>Configuration</h1>
+        <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+            <h1 class="mb-0">Configuration</h1>
+            <button type="button" class="btn btn-outline-secondary" id="refresh-health">Test Connections</button>
+        </div>
         <form action="/config" method="post" class="row g-3">
             {% for item in config_items %}
             <div class="col-12 col-md-6">
                 <div class="mb-2">
-                    <label for="{{ item.key }}" class="form-label">{{ item.key.replace('_', ' ').title() }}</label>
+                    {% set status = health_status.get(item.health_key) if item.health_key else None %}
+                    {% set detail = status.detail if status else 'Not checked yet.' %}
+                    {% set detail_lower = detail|lower %}
+                    <div class="d-flex justify-content-between align-items-center gap-2">
+                        <label for="{{ item.key }}" class="form-label mb-0">{{ item.key.replace('_', ' ').title() }}</label>
+                        {% if item.health_key %}
+                            {% if status and status.ok %}
+                                {% set badge_class = 'bg-success' %}
+                                {% set badge_label = 'Connected' %}
+                            {% elif 'no key' in detail_lower or 'missing' in detail_lower or 'url or token' in detail_lower %}
+                                {% set badge_class = 'bg-secondary' %}
+                                {% set badge_label = 'Not configured' %}
+                            {% elif status %}
+                                {% set badge_class = 'bg-danger' %}
+                                {% set badge_label = 'Error' %}
+                            {% else %}
+                                {% set badge_class = 'bg-secondary' %}
+                                {% set badge_label = 'Not checked' %}
+                            {% endif %}
+                            <span class="badge {{ badge_class }} health-badge" data-health-key="{{ item.health_key }}" title="{{ detail }}">{{ badge_label }}</span>
+                        {% endif %}
+                    </div>
                     {% if item.is_bool %}
                     <div class="form-check form-switch">
                         <input class="form-check-input" type="checkbox" id="{{ item.key }}" name="{{ item.key }}" {% if item.value %}checked{% endif %} {% if item.disabled %}disabled{% endif %}>
@@ -38,6 +62,9 @@
                     <div class="form-text">Managed by the {{ item.key.upper() }} environment variable.</div>
                     {% endif %}
                     {% endif %}
+                    {% if item.health_key %}
+                    <div class="form-text health-message" data-health-key="{{ item.health_key }}">{{ detail }}</div>
+                    {% endif %}
                 </div>
             </div>
             {% endfor %}
@@ -48,5 +75,66 @@
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        const healthData = {{ health_status | tojson }};
+        const badgeClasses = ['bg-success', 'bg-danger', 'bg-secondary', 'bg-warning'];
+
+        function describeStatus(status) {
+            if (!status) {
+                return { label: 'Not checked', detail: 'Not checked yet.', cls: 'bg-secondary' };
+            }
+            const detail = status.detail || '';
+            const lower = detail.toLowerCase();
+            if (status.ok) {
+                return { label: 'Connected', detail: detail || 'Connection successful.', cls: 'bg-success' };
+            }
+            if (!detail || lower.includes('no key') || lower.includes('missing') || lower.includes('url or token')) {
+                return { label: 'Not configured', detail: detail || 'Credentials missing.', cls: 'bg-secondary' };
+            }
+            return { label: 'Error', detail: detail, cls: 'bg-danger' };
+        }
+
+        function applyHealth(data) {
+            document.querySelectorAll('.health-badge').forEach((badge) => {
+                const key = badge.dataset.healthKey;
+                const status = data[key];
+                const desc = describeStatus(status);
+                badgeClasses.forEach((cls) => badge.classList.remove(cls));
+                badge.classList.add(desc.cls);
+                badge.textContent = desc.label;
+                badge.title = desc.detail;
+                const message = document.querySelector('.health-message[data-health-key="' + key + '"]');
+                if (message) {
+                    message.textContent = desc.detail;
+                }
+            });
+        }
+
+        applyHealth(healthData);
+
+        const refreshBtn = document.getElementById('refresh-health');
+        if (refreshBtn) {
+            refreshBtn.addEventListener('click', () => {
+                const original = refreshBtn.textContent;
+                refreshBtn.disabled = true;
+                refreshBtn.textContent = 'Testing...';
+                fetch('/health')
+                    .then((resp) => resp.json())
+                    .then((data) => {
+                        applyHealth(data);
+                        refreshBtn.textContent = original;
+                    })
+                    .catch(() => {
+                        refreshBtn.textContent = 'Retry Test';
+                    })
+                    .finally(() => {
+                        if (refreshBtn.textContent !== 'Retry Test') {
+                            refreshBtn.textContent = original;
+                        }
+                        refreshBtn.disabled = false;
+                    });
+            });
+        }
+    </script>
 </body>
 </html>

@@ -134,6 +134,19 @@ class Provider(ABC):
     def __init__(self, part: "PArt", api_key: Optional[str]):
         self.part = part
         self.api_key = api_key
+        self._cooldown_notified = False
+
+    def _check_cooldown(self, provider_name: str) -> bool:
+        on_cooldown, reason, remaining = self.part._provider_on_cooldown(provider_name)
+        if on_cooldown:
+            if not self._cooldown_notified:
+                minutes = max(1, int(remaining // 60) or 1)
+                detail = f" ({reason})" if reason else ""
+                log.info(f"{provider_name.upper()} provider on cooldown{detail}. Skipping for about {minutes} minute(s).")
+                self._cooldown_notified = True
+            return True
+        self._cooldown_notified = False
+        return False
 
     @abstractmethod
     def get_art(self, item, min_poster_w: int, min_back_w: int) -> ArtResult:
@@ -143,6 +156,9 @@ class Provider(ABC):
 class TMDbProvider(Provider):
     def get_art(self, item, min_poster_w: int, min_back_w: int) -> ArtResult:
         if not self.api_key:
+            return ArtResult()
+
+        if self._check_cooldown("tmdb"):
             return ArtResult()
 
         ids = self.part._resolve_external_ids(item)
@@ -193,6 +209,9 @@ class FanartProvider(Provider):
         if not self.api_key:
             return ArtResult()
 
+        if self._check_cooldown("fanart"):
+            return ArtResult()
+
         ids = self.part._resolve_external_ids(item)
         tmdb_id = ids.get('tmdb')
         tvdb_id = ids.get('tvdb')
@@ -229,8 +248,14 @@ class FanartProvider(Provider):
 
 
 class OMDbProvider(Provider):
+    def __init__(self, part, api_key: Optional[str]):
+        super().__init__(part, api_key)
+
     def get_art(self, item, min_poster_w: int, min_back_w: int) -> ArtResult:
         if not self.api_key:
+            return ArtResult()
+
+        if self._check_cooldown("omdb"):
             return ArtResult()
 
         ids = self.part._resolve_external_ids(item)
@@ -259,6 +284,9 @@ class OMDbProvider(Provider):
 class TVDbProvider(Provider):
     def get_art(self, item, min_poster_w: int, min_back_w: int) -> ArtResult:
         if not self.api_key or not item.type == 'show':
+            return ArtResult()
+
+        if self._check_cooldown("tvdb"):
             return ArtResult()
 
         ids = self.part._resolve_external_ids(item)
@@ -318,10 +346,10 @@ class PArt:
         "artwork_language": "en",
         "provider_priority": "tmdb,fanart,omdb",
         "final_approval": False,
-        "use_uploaded_posters": True,
+        "treat_generated_posters_as_missing": False,
     }
 
-    BOOL_KEYS = {"include_backgrounds", "overwrite", "dry_run", "final_approval", "use_uploaded_posters"}
+    BOOL_KEYS = {"include_backgrounds", "overwrite", "dry_run", "final_approval", "treat_generated_posters_as_missing"}
 
     def __init__(self):
         self.config = Config(Path(".p_art_config.json"))
@@ -334,18 +362,28 @@ class PArt:
             "webservice.fanart.tv": RateLimiter(rate_per_sec=1.0),
             "www.omdbapi.com": RateLimiter(rate_per_sec=3.0),
             "api.thetvdb.com": RateLimiter(rate_per_sec=1.0),
+            "api4.thetvdb.com": RateLimiter(rate_per_sec=1.0),
         }
-        self.provider_cooldowns: Dict[str, float] = {}
-        self.cooldown_duration = 12 * 60 * 60
+        self._provider_hosts = {
+            "api.themoviedb.org": "tmdb",
+            "webservice.fanart.tv": "fanart",
+            "www.omdbapi.com": "omdb",
+            "api.thetvdb.com": "tvdb",
+            "api4.thetvdb.com": "tvdb",
+        }
         self._change_log: List[ChangeLogEntry] = []
         self.proposed_changes: List[Dict] = []
 
         self._event_queue = queue.Queue()
         self._event_buffer = deque(maxlen=200)
         self._event_lock = threading.Lock()
+        self._cooldown_lock = threading.Lock()
+        self._provider_cooldowns: Dict[str, Tuple[float, Optional[str]]] = {}
         self.web_log_handler = WebLogHandler(self._enqueue_event)
         log.addHandler(self.web_log_handler)
         self.event_queue = self._event_queue
+        self.treat_generated_posters_as_missing = False
+        self.generated_poster_aspect_threshold = 1.0
 
         log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
         log_level = getattr(logging, log_level_str, logging.INFO)
@@ -382,40 +420,77 @@ class PArt:
     def _set_status(self, state: str):
         self._enqueue_event({"type": "status", "state": state})
 
+    def _set_provider_cooldown(self, provider: str, seconds: float, reason: Optional[str] = None):
+        if seconds <= 0:
+            return
+        cooldown_until = time.time() + seconds
+        with self._cooldown_lock:
+            current = self._provider_cooldowns.get(provider)
+            if current and current[0] >= cooldown_until:
+                return
+            self._provider_cooldowns[provider] = (cooldown_until, reason)
+        minutes = max(1, int(seconds // 60) or 1)
+        detail = f": {reason}" if reason else ""
+        log.warning(f"{provider.upper()} provider rate limited{detail}. Cooling down for about {minutes} minute(s).")
+
+    def _provider_on_cooldown(self, provider: str) -> Tuple[bool, Optional[str], float]:
+        with self._cooldown_lock:
+            info = self._provider_cooldowns.get(provider)
+            if not info:
+                return False, None, 0.0
+            until, reason = info
+            remaining = until - time.time()
+            if remaining <= 0:
+                self._provider_cooldowns.pop(provider, None)
+                return False, None, 0.0
+        return True, reason, max(0.0, remaining)
+
     def _host_of(self, url: str) -> str:
         return urlparse(url).netloc
 
-    def _get_provider_host(self, provider_name: str) -> Optional[str]:
-        host_map = {
-            "tmdb": "api.themoviedb.org",
-            "fanart": "webservice.fanart.tv",
-            "omdb": "www.omdbapi.com",
-            "tvdb": "api.thetvdb.com"
-        }
-        return host_map.get(provider_name)
+    def _looks_like_generated_poster(self, item) -> bool:
+        thumb_path = getattr(item, "thumb", "") or ""
+        if thumb_path.startswith("/library/parts/"):
+            return True
 
-    def _is_provider_in_cooldown(self, host: str) -> bool:
-        if host in self.provider_cooldowns:
-            cooldown_until = self.provider_cooldowns[host]
-            if time.time() < cooldown_until:
-                remaining = int((cooldown_until - time.time()) / 3600)
-                log.debug(f"Provider {host} is in cooldown for {remaining} more hours")
-                return True
-            else:
-                del self.provider_cooldowns[host]
+        aspect = getattr(item, "thumbAspectRatio", None)
+        if aspect is None:
+            aspect = getattr(item, "thumbaspectratio", None)
+        try:
+            aspect_value = float(aspect)
+        except (TypeError, ValueError):
+            aspect_value = None
+
+        if aspect_value and aspect_value >= self.generated_poster_aspect_threshold:
+            return True
+
         return False
 
-    def _set_provider_cooldown(self, host: str):
-        self.provider_cooldowns[host] = time.time() + self.cooldown_duration
-        hours = self.cooldown_duration / 3600
-        log.warning(f"Provider {host} has been put in cooldown for {hours} hours due to authentication failure")
+    def _get_existing_poster_candidate(self, item) -> Optional[Tuple[object, Optional[str]]]:
+        try:
+            posters = item.posters()
+        except Exception as exc:
+            log.debug(f"Failed to fetch existing posters for {getattr(item, 'title', 'Unknown')}: {exc}")
+            return None
+
+        if not posters:
+            return None
+
+        unselected = [p for p in posters if not getattr(p, "selected", False)]
+        candidate = unselected[0] if unselected else posters[0]
+
+        poster_url = None
+        key = getattr(candidate, "key", None)
+        if key and self.plex:
+            try:
+                poster_url = self.plex.url(key)
+            except Exception:
+                poster_url = None
+
+        return candidate, poster_url
 
     def _safe_get(self, url, params=None, headers=None) -> Optional[requests.Response]:
         host = self._host_of(url)
-        
-        if self._is_provider_in_cooldown(host):
-            return None
-            
         if host in self.limiters:
             self.limiters[host].wait()
         for attempt in range(4):
@@ -425,10 +500,43 @@ class PArt:
                 log.debug(f"Response: {r.status_code}")
                 if r and r.status_code == 200:
                     return r
-                if r and r.status_code == 401:
-                    log.error(f"Request to {url} failed with status 401 (Unauthorized). Check your API key.")
-                    self._set_provider_cooldown(host)
-                    return None
+                error_detail = ""
+                payload = None
+                if r:
+                    try:
+                        payload = r.json()
+                    except ValueError:
+                        payload = None
+                    if isinstance(payload, dict):
+                        error_detail = (
+                            payload.get("status_message")
+                            or payload.get("status")
+                            or payload.get("message")
+                            or payload.get("Error")
+                            or payload.get("error")
+                            or ""
+                        )
+                    if not error_detail and r.text:
+                        error_detail = r.text.strip()[:200]
+
+                provider_name = self._provider_hosts.get(host)
+                if r and provider_name:
+                    lower = (error_detail or "").lower()
+                    if r.status_code == 429 or ("limit" in lower and ("rate" in lower or "request" in lower)):
+                        retry_after_hint = 30 * 60  # default cooldown 30 minutes
+                        try:
+                            retry_after_hint = int(r.headers.get("Retry-After", retry_after_hint))
+                        except (TypeError, ValueError):
+                            pass
+                        reason = error_detail or f"HTTP {r.status_code}"
+                        self._set_provider_cooldown(provider_name, retry_after_hint, reason)
+                        log.warning(f"{provider_name.upper()} provider rate limited: {reason}")
+                        return None
+                    if r.status_code in (401, 403):
+                        detail = error_detail or f"HTTP {r.status_code}"
+                        self._set_provider_cooldown(provider_name, 12 * 3600, detail)
+                        log.error(f"{provider_name.upper()} provider unauthorized; further requests disabled for this run. Detail: {detail}")
+                        return None
                 retry_after = 0
                 if r and r.status_code in (429, 500, 502, 503, 504):
                     try:
@@ -499,14 +607,20 @@ class PArt:
         else:
             self.overwrite = os.getenv("OVERWRITE", "").lower() in ('true', '1', 'y', 'yes') if os.getenv("OVERWRITE") else self._get_yes_no("Overwrite existing artwork?", self.config.get("overwrite", False))
         self.dry_run = os.getenv("DRY_RUN", "").lower() in ('true', '1', 'y', 'yes') if os.getenv("DRY_RUN") else self._get_yes_no("Dry run (don't actually upload)?", self.config.get("dry_run", True))
-        self.use_uploaded_posters = os.getenv("USE_UPLOADED_POSTERS", "").lower() in ('true', '1', 'y', 'yes') if os.getenv("USE_UPLOADED_POSTERS") else self._get_yes_no("Use already-uploaded posters from Plex?", self.config.get("use_uploaded_posters", True))
         self.artwork_language = os.getenv("ARTWORK_LANGUAGE") or self._get_input("Artwork Language (e.g., en, fr, de)", self.config.get("artwork_language", "en"))
+        treat_generated_env = os.getenv("TREAT_GENERATED_POSTERS_AS_MISSING")
+        if treat_generated_env:
+            self.treat_generated_posters_as_missing = treat_generated_env.lower() in ('true', '1', 'y', 'yes')
+        else:
+            self.treat_generated_posters_as_missing = self._get_yes_no(
+                "Treat auto-generated frame posters as missing?", self.config.get("treat_generated_posters_as_missing", False)
+            )
 
         self.config.set("include_backgrounds", self.include_backgrounds)
         self.config.set("overwrite", self.overwrite)
         self.config.set("dry_run", self.dry_run)
-        self.config.set("use_uploaded_posters", self.use_uploaded_posters)
         self.config.set("artwork_language", self.artwork_language)
+        self.config.set("treat_generated_posters_as_missing", self.treat_generated_posters_as_missing)
         self.config.save()
 
         print(f"\n✓ Configuration saved to {self.config.config_path}")
@@ -523,6 +637,56 @@ class PArt:
             self.providers['omdb'] = OMDbProvider(self, self.omdb_key)
         if self.tvdb_key:
             self.providers['tvdb'] = TVDbProvider(self, self.tvdb_key)
+
+    def _prepare_library_batches(self):
+        batches = []
+        total_candidates = 0
+        total_work_items = 0
+
+        for library in self.libraries:
+            try:
+                items = library.all()
+            except Exception as e:
+                log.error(f"Error fetching items from {library.title}: {e}")
+                continue
+
+            item_count = len(items)
+            total_candidates += item_count
+            work_items = []
+            missing_posters = 0
+            missing_backgrounds = 0
+
+            for item in items:
+                raw_has_poster = bool(getattr(item, 'thumb', None))
+                has_background = bool(getattr(item, 'art', None))
+
+                generated_poster = False
+                if raw_has_poster and self.treat_generated_posters_as_missing:
+                    generated_poster = self._looks_like_generated_poster(item)
+
+                effective_has_poster = raw_has_poster and not (self.treat_generated_posters_as_missing and generated_poster)
+
+                if not effective_has_poster:
+                    missing_posters += 1
+                if self.include_backgrounds and not has_background:
+                    missing_backgrounds += 1
+
+                needs_poster = self.overwrite or not effective_has_poster
+                needs_background = self.include_backgrounds and (self.overwrite or not has_background)
+
+                if needs_poster or needs_background:
+                    work_items.append((item, needs_poster, needs_background))
+
+            total_work_items += len(work_items)
+            batches.append({
+                "library": library,
+                "work_items": work_items,
+                "item_count": item_count,
+                "missing_posters": missing_posters,
+                "missing_backgrounds": missing_backgrounds,
+            })
+
+        return batches, total_work_items, total_candidates
 
     def run(self):
         print("=" * 60)
@@ -550,6 +714,7 @@ class PArt:
         print(f"  - Include backgrounds: {self.include_backgrounds}")
         print(f"  - Overwrite existing: {self.overwrite}")
         print(f"  - Dry run: {self.dry_run}")
+        print(f"  - Treat generated posters as missing: {self.treat_generated_posters_as_missing}")
         print(f"  - Provider priority: {self.provider_priority}")
         print()
 
@@ -559,29 +724,42 @@ class PArt:
             print("Cancelled.")
             return
 
-        total_items = 0
-        for library in self.libraries:
+        batches, total_work_items, total_candidates = self._prepare_library_batches()
+        print(f"Scanned {total_candidates} items across {len(self.libraries)} libraries.")
+
+        if total_work_items == 0:
+            print("No items require artwork updates.")
+            return
+
+        processed = 0
+        for batch in batches:
+            library = batch["library"]
+            work_items = batch["work_items"]
+            item_count = batch["item_count"]
+            missing_posters = batch["missing_posters"]
+            missing_backgrounds = batch["missing_backgrounds"]
+
             print(f"\n{'=' * 60}")
             print(f"Processing: {library.title}")
             print(f"{'=' * 60}")
+            print(f"Total items: {item_count}")
+            print(f"Missing posters: {missing_posters}")
+            if self.include_backgrounds:
+                print(f"Missing backgrounds: {missing_backgrounds}")
 
-            try:
-                items = library.all()
-                item_count = len(items)
-                print(f"Found {item_count} items\n")
+            if not work_items:
+                print("Nothing to update in this library.")
+                continue
 
-                for i, item in enumerate(items):
-                    total_items += 1
-                    log.info(f"-> Processing {i + 1}/{item_count}: {item.title}")
-                    self._process_item(item)
-
-            except Exception as e:
-                print(f"✗ Error processing library {library.title}: {e}")
+            for i, (item, needs_poster, needs_background) in enumerate(work_items, 1):
+                processed += 1
+                log.info(f"-> Processing {i}/{len(work_items)}: {getattr(item, 'title', 'Unknown')}")
+                self._process_item(item, needs_poster, needs_background)
 
         self.cache.save()
 
         print(f"\n{'=' * 60}")
-        print(f"Processing complete! Processed {total_items} items.")
+        print(f"Processing complete! Updated {processed} items out of {total_candidates} scanned.")
         print(f"Cache saved to: {self.cache.cache_path}")
 
     def run_web(self):
@@ -609,39 +787,46 @@ class PArt:
             self._get_processing_options_from_config()
             self._get_providers()
 
-            provider_priority_str = self.config.get("provider_priority", "tmdb,fanart,omdb")
+            provider_priority_str = os.getenv("PROVIDER_PRIORITY") or self.config.get("provider_priority", "tmdb,fanart,omdb")
             self.provider_priority = [p.strip() for p in provider_priority_str.split(',') if p.strip()]
             if not self.provider_priority:
                 self.provider_priority = list(self.providers.keys())
 
-            library_batches = []
-            total_items = 0
-            for library in self.libraries:
-                try:
-                    items = library.all()
-                    item_count = len(items)
-                    total_items += item_count
-                    library_batches.append((library, items))
-                except Exception as e:
-                    log.error(f"Error fetching items from {library.title}: {e}")
+            batches, total_work_items, total_candidates = self._prepare_library_batches()
+            self._reset_progress(total_work_items)
 
-            self._reset_progress(total_items)
-
-            if total_items == 0:
+            if total_candidates == 0:
                 log.info("No media items found to process.")
+                return
+
+            if total_work_items == 0:
+                log.info("No items require artwork updates.")
                 return
 
             if not self.providers:
                 log.warning("No artwork providers are configured; skipping artwork lookup.")
 
-            for library, items in library_batches:
-                item_count = len(items)
-                log.info(f"Processing: {library.title}")
-                log.info(f"Found {item_count} items")
+            for batch in batches:
+                library = batch["library"]
+                work_items = batch["work_items"]
+                item_count = batch["item_count"]
+                missing_posters = batch["missing_posters"]
+                missing_backgrounds = batch["missing_backgrounds"]
 
-                for i, item in enumerate(items):
-                    log.info(f"-> Processing {i + 1}/{item_count}: {item.title}")
-                    self._process_item(item)
+                summary = f"Total items: {item_count}, missing posters: {missing_posters}"
+                if self.include_backgrounds:
+                    summary += f", missing backgrounds: {missing_backgrounds}"
+
+                log.info(f"Processing: {library.title}")
+                log.info(summary)
+
+                if not work_items:
+                    log.info("Nothing to update in this library.")
+                    continue
+
+                for i, (item, needs_poster, needs_background) in enumerate(work_items, 1):
+                    log.info(f"-> Processing {i}/{len(work_items)}: {getattr(item, 'title', 'Unknown')}")
+                    self._process_item(item, needs_poster, needs_background)
                     self._increment_progress()
 
             self.cache.save()
@@ -651,13 +836,13 @@ class PArt:
             self._set_status("idle")
 
     def _get_api_keys_from_config(self):
-        self.tmdb_key = self.config.get("tmdb_key", "")
-        self.fanart_key = self.config.get("fanart_key", "")
-        self.omdb_key = self.config.get("omdb_key", "")
-        self.tvdb_key = self.config.get("tvdb_key", "")
+        self.tmdb_key = os.getenv("TMDB_API_KEY") or self.config.get("tmdb_key", "")
+        self.fanart_key = os.getenv("FANART_API_KEY") or self.config.get("fanart_key", "")
+        self.omdb_key = os.getenv("OMDB_API_KEY") or self.config.get("omdb_key", "")
+        self.tvdb_key = os.getenv("TVDB_API_KEY") or self.config.get("tvdb_key", "")
 
     def _get_libraries_from_config(self):
-        libraries_env = self.config.get("libraries", "all")
+        libraries_env = os.getenv("LIBRARIES") or self.config.get("libraries", "all")
         all_libraries = self.plex.library.sections()
         if libraries_env.lower() == 'all':
             self.libraries = [lib for lib in all_libraries if lib.type in ('movie', 'show')]
@@ -672,31 +857,36 @@ class PArt:
             log.error("No matching Plex libraries were resolved from configuration.")
 
     def _get_processing_options_from_config(self):
-        self.include_backgrounds = self.config.get("include_backgrounds", True)
-        self.overwrite = self.config.get("overwrite", False)
-        self.dry_run = self.config.get("dry_run", True)
-        self.use_uploaded_posters = self.config.get("use_uploaded_posters", True)
-        self.artwork_language = self.config.get("artwork_language", "en")
+        include_backgrounds_env = os.getenv("INCLUDE_BACKGROUNDS")
+        self.include_backgrounds = include_backgrounds_env.lower() in ('true', '1', 'y', 'yes') if include_backgrounds_env else self.config.get("include_backgrounds", True)
+        
+        only_missing_env = os.getenv("ONLY_MISSING")
+        if only_missing_env and only_missing_env.lower() in ('true', '1', 'y', 'yes'):
+            self.overwrite = False
+        else:
+            overwrite_env = os.getenv("OVERWRITE")
+            self.overwrite = overwrite_env.lower() in ('true', '1', 'y', 'yes') if overwrite_env else self.config.get("overwrite", False)
+        
+        dry_run_env = os.getenv("DRY_RUN")
+        self.dry_run = dry_run_env.lower() in ('true', '1', 'y', 'yes') if dry_run_env else self.config.get("dry_run", True)
+        
+        self.artwork_language = os.getenv("ARTWORK_LANGUAGE") or self.config.get("artwork_language", "en")
         self.final_approval = self.config.get("final_approval", False)
+        treat_generated_env = os.getenv("TREAT_GENERATED_POSTERS_AS_MISSING")
+        if treat_generated_env:
+            self.treat_generated_posters_as_missing = treat_generated_env.lower() in ('true', '1', 'y', 'yes')
+        else:
+            self.treat_generated_posters_as_missing = self.config.get("treat_generated_posters_as_missing", False)
 
-    def apply_change(self, item_rating_key: str, new_poster: Optional[str], new_background: Optional[str], 
-                     uploaded_poster_obj=None, uploaded_art_obj=None):
+    def apply_change(self, item_rating_key: str, new_poster: Optional[str], new_background: Optional[str]):
         try:
             item = self.plex.fetchItem(int(item_rating_key))
             if new_poster:
-                if uploaded_poster_obj:
-                    item.setPoster(uploaded_poster_obj)
-                    log.info(f"Set uploaded poster for {item.title}")
-                else:
-                    item.uploadPoster(url=new_poster)
-                    log.info(f"Set poster for {item.title}")
+                item.uploadPoster(url=new_poster)
+                log.info(f"Set poster for {item.title}")
             if new_background:
-                if uploaded_art_obj:
-                    item.setArt(uploaded_art_obj)
-                    log.info(f"Set uploaded background for {item.title}")
-                else:
-                    item.uploadArt(url=new_background)
-                    log.info(f"Set background for {item.title}")
+                item.uploadArt(url=new_background)
+                log.info(f"Set background for {item.title}")
         except Exception as e:
             log.error(f"Failed to apply change for item {item_rating_key}: {e}")
 
@@ -716,128 +906,84 @@ class PArt:
 
         print(f"{'=' * 60}")
 
-    def _try_uploaded_posters(self, item) -> Tuple[object, object]:
-        """Try to find already-uploaded posters/backgrounds. Returns (poster_object, art_object)"""
-        selected_poster = None
-        selected_art = None
-        
-        try:
-            available_posters = item.posters()
-            unselected_posters = [p for p in available_posters if not p.selected]
-            
-            if unselected_posters and (self.overwrite or not item.thumb):
-                log.info(f"  - Found {len(unselected_posters)} uploaded poster(s)")
-                selected_poster = unselected_posters[0]
-                
-            if self.include_backgrounds:
-                available_art = item.arts()
-                unselected_art = [a for a in available_art if not a.selected]
-                
-                if unselected_art and (self.overwrite or not item.art):
-                    log.info(f"  - Found {len(unselected_art)} uploaded background(s)")
-                    selected_art = unselected_art[0]
-                    
-        except Exception as e:
-            log.debug(f"  - Could not check uploaded posters: {e}")
-            
-        return selected_poster, selected_art
+    def _process_item(self, item, needs_poster=None, needs_background=None):
+        title = getattr(item, "title", "Unknown")
 
-    def _process_item(self, item):
-        title = getattr(item, 'title', 'Unknown')
+        raw_has_poster = bool(getattr(item, "thumb", None))
+        has_background = bool(getattr(item, "art", None))
 
-        has_poster = bool(getattr(item, 'thumb', None))
-        has_background = bool(getattr(item, 'art', None))
+        generated_poster = False
+        if raw_has_poster and self.treat_generated_posters_as_missing:
+            generated_poster = self._looks_like_generated_poster(item)
 
-        if not self.overwrite and has_poster and (not self.include_backgrounds or has_background):
+        effective_has_poster = raw_has_poster and not (self.treat_generated_posters_as_missing and generated_poster)
+
+        if needs_poster is None:
+            needs_poster = self.overwrite or not effective_has_poster
+        if needs_background is None:
+            needs_background = self.include_backgrounds and (self.overwrite or not has_background)
+        elif not self.include_backgrounds:
+            needs_background = False
+
+        if not needs_poster and not needs_background:
             log.info(f"  - Skipping '{title}', artwork already present.")
             return
 
-        uploaded_poster = None
-        uploaded_art = None
-
-        if self.use_uploaded_posters:
-            uploaded_poster, uploaded_art = self._try_uploaded_posters(item)
-            
-            if uploaded_poster or uploaded_art:
-                if self.final_approval:
-                    if uploaded_poster:
-                        poster_url = getattr(uploaded_poster, 'thumb', None) or self.plex.url(uploaded_poster.key)
-                        self.proposed_changes.append({
-                            "item_rating_key": item.ratingKey,
-                            "title": title,
-                            "current_poster": item.thumbUrl,
-                            "new_poster": poster_url,
-                            "source": "plex_uploaded",
-                            "uploaded_poster_obj": uploaded_poster
-                        })
-                    if uploaded_art:
-                        art_url = getattr(uploaded_art, 'thumb', None) or self.plex.url(uploaded_art.key)
-                        self.proposed_changes.append({
-                            "item_rating_key": item.ratingKey,
-                            "title": title,
-                            "current_background": item.artUrl,
-                            "new_background": art_url,
-                            "source": "plex_uploaded",
-                            "uploaded_art_obj": uploaded_art
-                        })
-                    log.info(f"  - Uploaded poster(s) queued for approval")
-                    if uploaded_poster and (not self.include_backgrounds or uploaded_art):
-                        return
-                else:
-                    if uploaded_poster:
-                        if self.dry_run:
-                            log.info(f"  [DRY RUN] Would set uploaded poster")
-                        else:
-                            item.setPoster(uploaded_poster)
-                            log.info(f"  ✓ Set uploaded poster")
-                        self._change_log.append(ChangeLogEntry(
-                            title=title,
-                            poster_changed=True,
-                            source="plex_uploaded",
-                            dry_run=self.dry_run
-                        ))
-                    if uploaded_art:
-                        if self.dry_run:
-                            log.info(f"  [DRY RUN] Would set uploaded background")
-                        else:
-                            item.setArt(uploaded_art)
-                            log.info(f"  ✓ Set uploaded background")
-                        self._change_log.append(ChangeLogEntry(
-                            title=title,
-                            background_changed=True,
-                            source="plex_uploaded",
-                            dry_run=self.dry_run
-                        ))
-                    
-                    if uploaded_poster and (not self.include_backgrounds or uploaded_art):
-                        return
-
         result = ArtResult()
+        poster_applied = False
+        background_applied = False
+
+        if needs_poster and not self.final_approval:
+            local_candidate = self._get_existing_poster_candidate(item)
+            if local_candidate:
+                poster_obj, local_url = local_candidate
+                if self.dry_run:
+                    log.info(f"  [DRY RUN] Would select existing Plex poster for: {title}")
+                    poster_applied = True
+                    needs_poster = False
+                else:
+                    try:
+                        item.setPoster(poster=poster_obj)
+                        log.info(f"  \u2713 Selected existing Plex poster for: {title}")
+                        poster_applied = True
+                        needs_poster = False
+                    except Exception as exc:
+                        log.info(f"  \u2717 Failed to select existing Plex poster for {title}: {exc}")
+                if poster_applied:
+                    if local_url and not result.poster_url:
+                        result.poster_url = local_url
+                    if not result.source:
+                        result.source = "plex-library"
+
+        remaining_poster = needs_poster
+        remaining_background = needs_background
 
         for provider_name in self.provider_priority:
-            if provider_name in self.providers:
-                provider_host = self._get_provider_host(provider_name)
-                if provider_host and self._is_provider_in_cooldown(provider_host):
-                    log.info(f"  - Skipping {provider_name} (in cooldown due to authentication failure)")
-                    continue
-                    
-                log.info(f"  - Checking {provider_name} for '{title}'...")
-                provider = self.providers[provider_name]
-                provider_result = provider.get_art(item, 600, 1920) # TODO: make min widths configurable
+            if not (remaining_poster or remaining_background):
+                break
+            provider = self.providers.get(provider_name)
+            if not provider:
+                continue
 
+            log.info(f"  - Checking {provider_name} for '{title}'...")
+            provider_result = provider.get_art(item, 600, 1920)  # TODO: make min widths configurable
+
+            if remaining_poster and provider_result.poster_url:
                 if not result.poster_url:
                     result.poster_url = provider_result.poster_url
-                if self.include_backgrounds and not result.background_url:
-                    result.background_url = provider_result.background_url
-                if provider_result.poster_url or provider_result.background_url:
-                    result.source = provider_result.source
+                    if provider_result.source:
+                        result.source = provider_result.source
+                remaining_poster = False
 
-            if result.poster_url and (not self.include_backgrounds or result.background_url):
-                break
+            if remaining_background and provider_result.background_url:
+                if not result.background_url:
+                    result.background_url = provider_result.background_url
+                    if provider_result.source:
+                        result.source = provider_result.source
+                remaining_background = False
 
         if self.final_approval:
-            queued_items = []
-            if result.poster_url and (self.overwrite or not has_poster):
+            if needs_poster and result.poster_url and (self.overwrite or not effective_has_poster):
                 self.proposed_changes.append({
                     "item_rating_key": item.ratingKey,
                     "title": title,
@@ -845,8 +991,7 @@ class PArt:
                     "new_poster": result.poster_url,
                     "source": result.source
                 })
-                queued_items.append("poster")
-            if self.include_backgrounds and result.background_url and (self.overwrite or not has_background):
+            if needs_background and result.background_url and (self.overwrite or not has_background):
                 self.proposed_changes.append({
                     "item_rating_key": item.ratingKey,
                     "title": title,
@@ -854,47 +999,50 @@ class PArt:
                     "new_background": result.background_url,
                     "source": result.source
                 })
-                queued_items.append("background")
-            if queued_items:
-                log.info(f"  → Queued {', '.join(queued_items)} from {result.source} for approval")
             return
 
-        updated = False
-        if result.poster_url and (self.overwrite or not has_poster):
+        if needs_poster and result.poster_url and (self.overwrite or not effective_has_poster):
             if self.dry_run:
                 log.info(f"  [DRY RUN] Would set poster from {result.source}: {title}")
+                poster_applied = True
             else:
                 try:
                     item.uploadPoster(url=result.poster_url)
-                    log.info(f"  ✓ Set poster from {result.source}: {title}")
-                    updated = True
-                except Exception as e:
-                    log.info(f"  ✗ Failed to set poster for {title}: {e}")
+                    log.info(f"  \u2713 Set poster from {result.source}: {title}")
+                    poster_applied = True
+                except Exception as exc:
+                    log.info(f"  \u2717 Failed to set poster for {title}: {exc}")
 
-        if self.include_backgrounds and result.background_url and (self.overwrite or not has_background):
+        if needs_background and result.background_url and (self.overwrite or not has_background):
             if self.dry_run:
                 log.info(f"  [DRY RUN] Would set background from {result.source}: {title}")
+                background_applied = True
             else:
                 try:
                     item.uploadArt(url=result.background_url)
-                    log.info(f"  ✓ Set background from {result.source}: {title}")
-                    updated = True
-                except Exception as e:
-                    log.info(f"  ✗ Failed to set background for {title}: {e}")
+                    log.info(f"  \u2713 Set background from {result.source}: {title}")
+                    background_applied = True
+                except Exception as exc:
+                    log.info(f"  \u2717 Failed to set background for {title}: {exc}")
 
-        if not updated:
-            if not result.poster_url and not result.background_url:
-                log.info(f"  - No artwork found for '{title}'")
+        updated = poster_applied or background_applied
+        if not updated and not self.dry_run:
+            missing_bits = []
+            if needs_poster and not result.poster_url:
+                missing_bits.append("poster")
+            if needs_background and not result.background_url:
+                missing_bits.append("background")
+            if missing_bits:
+                log.info(f"  - No {'/'.join(missing_bits)} found for: {title}")
 
-        if updated or (self.dry_run and (result.poster_url or result.background_url)):
+        if updated:
             self._change_log.append(ChangeLogEntry(
                 title=title,
-                poster_changed=bool(result.poster_url and (self.overwrite or not has_poster)),
-                background_changed=bool(self.include_backgrounds and result.background_url and (self.overwrite or not has_background)),
+                poster_changed=poster_applied,
+                background_changed=background_applied,
                 source=result.source,
                 dry_run=self.dry_run
             ))
-
     def _get_api_keys(self):
         print("\n[Step 2/5] API Keys")
         print("Enter your API keys (press Enter to skip)")
