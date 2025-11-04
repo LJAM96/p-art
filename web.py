@@ -34,6 +34,7 @@ ENV_VAR_MAP = {
     "artwork_language": "ARTWORK_LANGUAGE",
     "provider_priority": "PROVIDER_PRIORITY",
     "final_approval": "FINAL_APPROVAL",
+    "treat_generated_posters_as_missing": "TREAT_GENERATED_POSTERS_AS_MISSING",
 }
 
 FIELD_HEALTH_MAP = {

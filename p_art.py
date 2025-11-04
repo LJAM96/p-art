@@ -346,9 +346,10 @@ class PArt:
         "artwork_language": "en",
         "provider_priority": "tmdb,fanart,omdb",
         "final_approval": False,
+        "treat_generated_posters_as_missing": False,
     }
 
-    BOOL_KEYS = {"include_backgrounds", "overwrite", "dry_run", "final_approval"}
+    BOOL_KEYS = {"include_backgrounds", "overwrite", "dry_run", "final_approval", "treat_generated_posters_as_missing"}
 
     def __init__(self):
         self.config = Config(Path(".p_art_config.json"))
@@ -381,6 +382,8 @@ class PArt:
         self.web_log_handler = WebLogHandler(self._enqueue_event)
         log.addHandler(self.web_log_handler)
         self.event_queue = self._event_queue
+        self.treat_generated_posters_as_missing = False
+        self.generated_poster_aspect_threshold = 1.0
 
         log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
         log_level = getattr(logging, log_level_str, logging.INFO)
@@ -444,6 +447,24 @@ class PArt:
 
     def _host_of(self, url: str) -> str:
         return urlparse(url).netloc
+
+    def _looks_like_generated_poster(self, item) -> bool:
+        thumb_path = getattr(item, "thumb", "") or ""
+        if thumb_path.startswith("/library/parts/"):
+            return True
+
+        aspect = getattr(item, "thumbAspectRatio", None)
+        if aspect is None:
+            aspect = getattr(item, "thumbaspectratio", None)
+        try:
+            aspect_value = float(aspect)
+        except (TypeError, ValueError):
+            aspect_value = None
+
+        if aspect_value and aspect_value >= self.generated_poster_aspect_threshold:
+            return True
+
+        return False
 
     def _safe_get(self, url, params=None, headers=None) -> Optional[requests.Response]:
         host = self._host_of(url)
@@ -564,11 +585,19 @@ class PArt:
             self.overwrite = os.getenv("OVERWRITE", "").lower() in ('true', '1', 'y', 'yes') if os.getenv("OVERWRITE") else self._get_yes_no("Overwrite existing artwork?", self.config.get("overwrite", False))
         self.dry_run = os.getenv("DRY_RUN", "").lower() in ('true', '1', 'y', 'yes') if os.getenv("DRY_RUN") else self._get_yes_no("Dry run (don't actually upload)?", self.config.get("dry_run", True))
         self.artwork_language = os.getenv("ARTWORK_LANGUAGE") or self._get_input("Artwork Language (e.g., en, fr, de)", self.config.get("artwork_language", "en"))
+        treat_generated_env = os.getenv("TREAT_GENERATED_POSTERS_AS_MISSING")
+        if treat_generated_env:
+            self.treat_generated_posters_as_missing = treat_generated_env.lower() in ('true', '1', 'y', 'yes')
+        else:
+            self.treat_generated_posters_as_missing = self._get_yes_no(
+                "Treat auto-generated frame posters as missing?", self.config.get("treat_generated_posters_as_missing", False)
+            )
 
         self.config.set("include_backgrounds", self.include_backgrounds)
         self.config.set("overwrite", self.overwrite)
         self.config.set("dry_run", self.dry_run)
         self.config.set("artwork_language", self.artwork_language)
+        self.config.set("treat_generated_posters_as_missing", self.treat_generated_posters_as_missing)
         self.config.save()
 
         print(f"\n✓ Configuration saved to {self.config.config_path}")
@@ -605,15 +634,21 @@ class PArt:
             missing_backgrounds = 0
 
             for item in items:
-                has_poster = bool(getattr(item, 'thumb', None))
+                raw_has_poster = bool(getattr(item, 'thumb', None))
                 has_background = bool(getattr(item, 'art', None))
 
-                if not has_poster:
+                generated_poster = False
+                if raw_has_poster and self.treat_generated_posters_as_missing:
+                    generated_poster = self._looks_like_generated_poster(item)
+
+                effective_has_poster = raw_has_poster and not (self.treat_generated_posters_as_missing and generated_poster)
+
+                if not effective_has_poster:
                     missing_posters += 1
                 if self.include_backgrounds and not has_background:
                     missing_backgrounds += 1
 
-                needs_poster = self.overwrite or not has_poster
+                needs_poster = self.overwrite or not effective_has_poster
                 needs_background = self.include_backgrounds and (self.overwrite or not has_background)
 
                 if needs_poster or needs_background:
@@ -656,6 +691,7 @@ class PArt:
         print(f"  - Include backgrounds: {self.include_backgrounds}")
         print(f"  - Overwrite existing: {self.overwrite}")
         print(f"  - Dry run: {self.dry_run}")
+        print(f"  - Treat generated posters as missing: {self.treat_generated_posters_as_missing}")
         print(f"  - Provider priority: {self.provider_priority}")
         print()
 
@@ -813,6 +849,11 @@ class PArt:
         
         self.artwork_language = os.getenv("ARTWORK_LANGUAGE") or self.config.get("artwork_language", "en")
         self.final_approval = self.config.get("final_approval", False)
+        treat_generated_env = os.getenv("TREAT_GENERATED_POSTERS_AS_MISSING")
+        if treat_generated_env:
+            self.treat_generated_posters_as_missing = treat_generated_env.lower() in ('true', '1', 'y', 'yes')
+        else:
+            self.treat_generated_posters_as_missing = self.config.get("treat_generated_posters_as_missing", False)
 
     def apply_change(self, item_rating_key: str, new_poster: Optional[str], new_background: Optional[str]):
         try:
@@ -845,11 +886,17 @@ class PArt:
     def _process_item(self, item, needs_poster=None, needs_background=None):
         title = getattr(item, 'title', 'Unknown')
 
-        has_poster = bool(getattr(item, 'thumb', None))
+        raw_has_poster = bool(getattr(item, 'thumb', None))
         has_background = bool(getattr(item, 'art', None))
 
+        generated_poster = False
+        if raw_has_poster and self.treat_generated_posters_as_missing:
+            generated_poster = self._looks_like_generated_poster(item)
+
+        effective_has_poster = raw_has_poster and not (self.treat_generated_posters_as_missing and generated_poster)
+
         if needs_poster is None:
-            needs_poster = self.overwrite or not has_poster
+            needs_poster = self.overwrite or not effective_has_poster
         if needs_background is None:
             needs_background = self.include_backgrounds and (self.overwrite or not has_background)
         elif not self.include_backgrounds:
@@ -941,8 +988,8 @@ class PArt:
         if updated or (self.dry_run and (result.poster_url or result.background_url)):
             self._change_log.append(ChangeLogEntry(
                 title=title,
-                poster_changed=bool(needs_poster and result.poster_url and (self.overwrite or not has_poster)),
-                background_changed=bool(needs_background and result.background_url and (self.overwrite or not has_background)),
+            poster_changed=bool(needs_poster and result.poster_url and (self.overwrite or not effective_has_poster)),
+            background_changed=bool(needs_background and result.background_url and (self.overwrite or not has_background)),
                 source=result.source,
                 dry_run=self.dry_run
             ))
