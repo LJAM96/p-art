@@ -489,6 +489,29 @@ class PArt:
 
         return candidate, poster_url
 
+    def _get_existing_background_candidate(self, item) -> Optional[Tuple[object, Optional[str]]]:
+        try:
+            arts = item.arts()
+        except Exception as exc:
+            log.debug(f"Failed to fetch existing backgrounds for {getattr(item, 'title', 'Unknown')}: {exc}")
+            return None
+
+        if not arts:
+            return None
+
+        unselected = [a for a in arts if not getattr(a, "selected", False)]
+        candidate = unselected[0] if unselected else arts[0]
+
+        art_url = None
+        key = getattr(candidate, "key", None)
+        if key and self.plex:
+            try:
+                art_url = self.plex.url(key)
+            except Exception:
+                art_url = None
+
+        return candidate, art_url
+
     def _safe_get(self, url, params=None, headers=None) -> Optional[requests.Response]:
         host = self._host_of(url)
         if host in self.limiters:
@@ -933,27 +956,86 @@ class PArt:
         poster_applied = False
         background_applied = False
 
-        if needs_poster and not self.final_approval:
+        # Check for existing uploaded posters/backgrounds
+        if needs_poster:
             local_candidate = self._get_existing_poster_candidate(item)
             if local_candidate:
                 poster_obj, local_url = local_candidate
-                if self.dry_run:
-                    log.info(f"  [DRY RUN] Would select existing Plex poster for: {title}")
+                
+                if self.final_approval:
+                    # Queue for approval
+                    self.proposed_changes.append({
+                        "item_rating_key": item.ratingKey,
+                        "title": title,
+                        "current_poster": item.thumbUrl,
+                        "new_poster": local_url,
+                        "source": "plex_uploaded",
+                        "uploaded_poster_obj": poster_obj
+                    })
+                    log.info(f"  → Queued uploaded poster from Plex for approval")
                     poster_applied = True
                     needs_poster = False
                 else:
-                    try:
-                        item.setPoster(poster=poster_obj)
-                        log.info(f"  \u2713 Selected existing Plex poster for: {title}")
+                    # Apply immediately
+                    if self.dry_run:
+                        log.info(f"  [DRY RUN] Would select existing Plex poster for: {title}")
                         poster_applied = True
                         needs_poster = False
-                    except Exception as exc:
-                        log.info(f"  \u2717 Failed to select existing Plex poster for {title}: {exc}")
-                if poster_applied:
-                    if local_url and not result.poster_url:
-                        result.poster_url = local_url
-                    if not result.source:
-                        result.source = "plex-library"
+                    else:
+                        try:
+                            item.setPoster(poster=poster_obj)
+                            log.info(f"  ✓ Selected existing Plex poster for: {title}")
+                            poster_applied = True
+                            needs_poster = False
+                        except Exception as exc:
+                            log.info(f"  ✗ Failed to select existing Plex poster for {title}: {exc}")
+                    if poster_applied:
+                        if local_url and not result.poster_url:
+                            result.poster_url = local_url
+                        if not result.source:
+                            result.source = "plex_uploaded"
+
+        if needs_background:
+            local_bg_candidate = self._get_existing_background_candidate(item)
+            if local_bg_candidate:
+                bg_obj, local_bg_url = local_bg_candidate
+                
+                if self.final_approval:
+                    # Queue for approval
+                    self.proposed_changes.append({
+                        "item_rating_key": item.ratingKey,
+                        "title": title,
+                        "current_background": item.artUrl,
+                        "new_background": local_bg_url,
+                        "source": "plex_uploaded",
+                        "uploaded_art_obj": bg_obj
+                    })
+                    log.info(f"  → Queued uploaded background from Plex for approval")
+                    background_applied = True
+                    needs_background = False
+                else:
+                    # Apply immediately
+                    if self.dry_run:
+                        log.info(f"  [DRY RUN] Would select existing Plex background for: {title}")
+                        background_applied = True
+                        needs_background = False
+                    else:
+                        try:
+                            item.setArt(art=bg_obj)
+                            log.info(f"  ✓ Selected existing Plex background for: {title}")
+                            background_applied = True
+                            needs_background = False
+                        except Exception as exc:
+                            log.info(f"  ✗ Failed to select existing Plex background for {title}: {exc}")
+                    if background_applied:
+                        if local_bg_url and not result.background_url:
+                            result.background_url = local_bg_url
+                        if not result.source:
+                            result.source = "plex_uploaded"
+
+        # If final_approval and both uploaded poster/background found, return early
+        if self.final_approval and poster_applied and (not self.include_backgrounds or background_applied):
+            return
 
         remaining_poster = needs_poster
         remaining_background = needs_background
