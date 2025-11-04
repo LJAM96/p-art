@@ -134,6 +134,19 @@ class Provider(ABC):
     def __init__(self, part: "PArt", api_key: Optional[str]):
         self.part = part
         self.api_key = api_key
+        self._cooldown_notified = False
+
+    def _check_cooldown(self, provider_name: str) -> bool:
+        on_cooldown, reason, remaining = self.part._provider_on_cooldown(provider_name)
+        if on_cooldown:
+            if not self._cooldown_notified:
+                minutes = max(1, int(remaining // 60) or 1)
+                detail = f" ({reason})" if reason else ""
+                log.info(f"{provider_name.upper()} provider on cooldown{detail}. Skipping for about {minutes} minute(s).")
+                self._cooldown_notified = True
+            return True
+        self._cooldown_notified = False
+        return False
 
     @abstractmethod
     def get_art(self, item, min_poster_w: int, min_back_w: int) -> ArtResult:
@@ -143,6 +156,9 @@ class Provider(ABC):
 class TMDbProvider(Provider):
     def get_art(self, item, min_poster_w: int, min_back_w: int) -> ArtResult:
         if not self.api_key:
+            return ArtResult()
+
+        if self._check_cooldown("tmdb"):
             return ArtResult()
 
         ids = self.part._resolve_external_ids(item)
@@ -193,6 +209,9 @@ class FanartProvider(Provider):
         if not self.api_key:
             return ArtResult()
 
+        if self._check_cooldown("fanart"):
+            return ArtResult()
+
         ids = self.part._resolve_external_ids(item)
         tmdb_id = ids.get('tmdb')
         tvdb_id = ids.get('tvdb')
@@ -231,21 +250,13 @@ class FanartProvider(Provider):
 class OMDbProvider(Provider):
     def __init__(self, part, api_key: Optional[str]):
         super().__init__(part, api_key)
-        self._cooldown_notified = False
 
     def get_art(self, item, min_poster_w: int, min_back_w: int) -> ArtResult:
         if not self.api_key:
             return ArtResult()
 
-        on_cooldown, reason, remaining = self.part._provider_on_cooldown("omdb")
-        if on_cooldown:
-            if not self._cooldown_notified:
-                minutes = max(1, int(remaining // 60) or 1)
-                detail = f" ({reason})" if reason else ""
-                log.info(f"OMDb provider on cooldown{detail}. Skipping for about {minutes} minute(s).")
-                self._cooldown_notified = True
+        if self._check_cooldown("omdb"):
             return ArtResult()
-        self._cooldown_notified = False
 
         ids = self.part._resolve_external_ids(item)
         imdb_id = ids.get('imdb')
@@ -273,6 +284,9 @@ class OMDbProvider(Provider):
 class TVDbProvider(Provider):
     def get_art(self, item, min_poster_w: int, min_back_w: int) -> ArtResult:
         if not self.api_key or not item.type == 'show':
+            return ArtResult()
+
+        if self._check_cooldown("tvdb"):
             return ArtResult()
 
         ids = self.part._resolve_external_ids(item)
@@ -347,6 +361,14 @@ class PArt:
             "webservice.fanart.tv": RateLimiter(rate_per_sec=1.0),
             "www.omdbapi.com": RateLimiter(rate_per_sec=3.0),
             "api.thetvdb.com": RateLimiter(rate_per_sec=1.0),
+            "api4.thetvdb.com": RateLimiter(rate_per_sec=1.0),
+        }
+        self._provider_hosts = {
+            "api.themoviedb.org": "tmdb",
+            "webservice.fanart.tv": "fanart",
+            "www.omdbapi.com": "omdb",
+            "api.thetvdb.com": "tvdb",
+            "api4.thetvdb.com": "tvdb",
         }
         self._change_log: List[ChangeLogEntry] = []
         self.proposed_changes: List[Dict] = []
@@ -434,27 +456,42 @@ class PArt:
                 log.debug(f"Response: {r.status_code}")
                 if r and r.status_code == 200:
                     return r
-                if r and host == "www.omdbapi.com":
-                    error_detail = ""
+                error_detail = ""
+                payload = None
+                if r:
                     try:
                         payload = r.json()
-                        error_detail = payload.get("Error") or payload.get("error") or ""
                     except ValueError:
-                        if r.text:
-                            error_detail = r.text.strip()[:200]
-                    lower = error_detail.lower()
+                        payload = None
+                    if isinstance(payload, dict):
+                        error_detail = (
+                            payload.get("status_message")
+                            or payload.get("status")
+                            or payload.get("message")
+                            or payload.get("Error")
+                            or payload.get("error")
+                            or ""
+                        )
+                    if not error_detail and r.text:
+                        error_detail = r.text.strip()[:200]
+
+                provider_name = self._provider_hosts.get(host)
+                if r and provider_name:
+                    lower = (error_detail or "").lower()
                     if r.status_code == 429 or ("limit" in lower and ("rate" in lower or "request" in lower)):
                         retry_after_hint = 30 * 60  # default cooldown 30 minutes
                         try:
                             retry_after_hint = int(r.headers.get("Retry-After", retry_after_hint))
                         except (TypeError, ValueError):
                             pass
-                        self._set_provider_cooldown("omdb", retry_after_hint, error_detail or f"HTTP {r.status_code}")
+                        reason = error_detail or f"HTTP {r.status_code}"
+                        self._set_provider_cooldown(provider_name, retry_after_hint, reason)
+                        log.warning(f"{provider_name.upper()} provider rate limited: {reason}")
                         return None
-                    if r.status_code == 401:
+                    if r.status_code in (401, 403):
                         detail = error_detail or f"HTTP {r.status_code}"
-                        self._set_provider_cooldown("omdb", 12 * 3600, detail)
-                        log.error(f"OMDb provider unauthorized; further requests disabled for this run. Detail: {detail}")
+                        self._set_provider_cooldown(provider_name, 12 * 3600, detail)
+                        log.error(f"{provider_name.upper()} provider unauthorized; further requests disabled for this run. Detail: {detail}")
                         return None
                 retry_after = 0
                 if r and r.status_code in (429, 500, 502, 503, 504):
