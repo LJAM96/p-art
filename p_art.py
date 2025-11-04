@@ -11,15 +11,16 @@ from dataclasses import dataclass
 from typing import Optional, Dict, Tuple, List
 from pathlib import Path
 from urllib.parse import urlparse
-import queue
+from collections import deque
 
 class WebLogHandler(logging.Handler):
-    def __init__(self):
+    def __init__(self, enqueue_callback):
         super().__init__()
-        self.queue = queue.Queue()
+        self.enqueue_callback = enqueue_callback
 
     def emit(self, record):
-        self.queue.put(self.format(record))
+        message = self.format(record)
+        self.enqueue_callback({"type": "log", "message": message})
 
 import requests
 from plexapi.server import PlexServer
@@ -110,6 +111,15 @@ class Config:
             self.config_path.write_text(json.dumps(self.config, indent=2))
         except Exception:
             pass
+
+    def ensure_defaults(self, defaults: Dict[str, object]):
+        changed = False
+        for key, value in defaults.items():
+            if key not in self.config:
+                self.config[key] = value
+                changed = True
+        if changed:
+            self.save()
 
     def get(self, key: str, default=None):
         return self.config.get(key, default)
@@ -294,8 +304,27 @@ class TVDbProvider(Provider):
 
 
 class PArt:
+    CONFIG_DEFAULTS = {
+        "plex_url": "",
+        "plex_token": "",
+        "libraries": "all",
+        "tmdb_key": "",
+        "fanart_key": "",
+        "omdb_key": "",
+        "tvdb_key": "",
+        "include_backgrounds": True,
+        "overwrite": False,
+        "dry_run": True,
+        "artwork_language": "en",
+        "provider_priority": "tmdb,fanart,omdb",
+        "final_approval": False,
+    }
+
+    BOOL_KEYS = {"include_backgrounds", "overwrite", "dry_run", "final_approval"}
+
     def __init__(self):
         self.config = Config(Path(".p_art_config.json"))
+        self.config.ensure_defaults(self.CONFIG_DEFAULTS)
         self.cache = Cache(Path(".provider_cache.json"))
         self.plex: Optional[PlexServer] = None
         self.session = requests.Session()
@@ -308,8 +337,12 @@ class PArt:
         self._change_log: List[ChangeLogEntry] = []
         self.proposed_changes: List[Dict] = []
 
-        self.web_log_handler = WebLogHandler()
+        self._event_queue = queue.Queue()
+        self._event_buffer = deque(maxlen=200)
+        self._event_lock = threading.Lock()
+        self.web_log_handler = WebLogHandler(self._enqueue_event)
         log.addHandler(self.web_log_handler)
+        self.event_queue = self._event_queue
 
         log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
         log_level = getattr(logging, log_level_str, logging.INFO)
@@ -320,6 +353,31 @@ class PArt:
             handler = logging.FileHandler(log_file)
             handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
             log.addHandler(handler)
+
+        self.progress_total = 0
+        self.progress_done = 0
+        self.is_running = False
+
+    def _enqueue_event(self, payload: Dict[str, object]):
+        with self._event_lock:
+            self._event_buffer.append(payload)
+        self._event_queue.put(payload)
+
+    def get_recent_events(self) -> List[Dict[str, object]]:
+        with self._event_lock:
+            return list(self._event_buffer)
+
+    def _reset_progress(self, total: int):
+        self.progress_total = total
+        self.progress_done = 0
+        self._enqueue_event({"type": "progress", "completed": self.progress_done, "total": self.progress_total})
+
+    def _increment_progress(self, step: int = 1):
+        self.progress_done = min(self.progress_total, self.progress_done + step)
+        self._enqueue_event({"type": "progress", "completed": self.progress_done, "total": self.progress_total})
+
+    def _set_status(self, state: str):
+        self._enqueue_event({"type": "status", "state": state})
 
     def _host_of(self, url: str) -> str:
         return urlparse(url).netloc
@@ -395,24 +453,6 @@ class PArt:
                 best_w = w
         return best
 
-    def run(self):
-        print("=" * 60)
-        print("Plex Poster and Background Filler")
-        print("=" * 60)
-
-        if self.config.config and not os.getenv("PLEX_URL"):
-            print("\n✓ Loaded saved configuration from previous run")
-
-        self._connect_to_plex()
-
-        if not self.plex:
-            print("\nCannot continue without Plex connection. Exiting.")
-            return
-
-        self._get_api_keys()
-        self._select_libraries()
-        self._get_processing_options()
-
     def _get_processing_options(self):
         print("\n[Step 4/5] Processing Options")
         self.include_backgrounds = os.getenv("INCLUDE_BACKGROUNDS", "").lower() in ('true', '1', 'y', 'yes') if os.getenv("INCLUDE_BACKGROUNDS") else self._get_yes_no("Include backgrounds/art?", self.config.get("include_backgrounds", True))
@@ -454,11 +494,11 @@ class PArt:
         if self.config.config and not os.getenv("PLEX_URL"):
             print("\n✓ Loaded saved configuration from previous run")
 
-        self._connect_to_plex()
-
-        if not self.plex:
-            print("\nCannot continue without Plex connection. Exiting.")
+        if not self._connect_to_plex(interactive=True):
             return
+
+        self._change_log = []
+        self.proposed_changes = []
 
         self._get_api_keys()
         self._select_libraries()
@@ -507,38 +547,70 @@ class PArt:
         print(f"Cache saved to: {self.cache.cache_path}")
 
     def run_web(self):
-        log.info("Starting artwork update from web UI...")
-        self._connect_to_plex()
-        if not self.plex:
-            log.error("Cannot start artwork update: Plex connection failed.")
+        if self.is_running:
+            log.warning("Artwork update already in progress. Ignoring new request.")
             return
 
-        self._get_api_keys_from_config()
-        self._get_libraries_from_config()
-        self._get_processing_options_from_config()
-        self._get_providers()
+        log.info("Starting artwork update from web UI...")
+        self.is_running = True
+        self._set_status("running")
+        self._change_log = []
+        self.proposed_changes = []
+        self._reset_progress(0)
 
-        provider_priority_str = self.config.get("provider_priority", "tmdb,fanart,omdb")
-        self.provider_priority = [p.strip() for p in provider_priority_str.split(',')]
+        try:
+            if not self._connect_to_plex(interactive=False):
+                return
 
-        total_items = 0
-        for library in self.libraries:
-            log.info(f"Processing: {library.title}")
-            try:
-                items = library.all()
+            self._get_api_keys_from_config()
+            self._get_libraries_from_config()
+            if not getattr(self, "libraries", None):
+                log.error("No Plex libraries configured. Update cancelled.")
+                return
+
+            self._get_processing_options_from_config()
+            self._get_providers()
+
+            provider_priority_str = self.config.get("provider_priority", "tmdb,fanart,omdb")
+            self.provider_priority = [p.strip() for p in provider_priority_str.split(',') if p.strip()]
+            if not self.provider_priority:
+                self.provider_priority = list(self.providers.keys())
+
+            library_batches = []
+            total_items = 0
+            for library in self.libraries:
+                try:
+                    items = library.all()
+                    item_count = len(items)
+                    total_items += item_count
+                    library_batches.append((library, items))
+                except Exception as e:
+                    log.error(f"Error fetching items from {library.title}: {e}")
+
+            self._reset_progress(total_items)
+
+            if total_items == 0:
+                log.info("No media items found to process.")
+                return
+
+            if not self.providers:
+                log.warning("No artwork providers are configured; skipping artwork lookup.")
+
+            for library, items in library_batches:
                 item_count = len(items)
+                log.info(f"Processing: {library.title}")
                 log.info(f"Found {item_count} items")
 
                 for i, item in enumerate(items):
-                    total_items += 1
                     log.info(f"-> Processing {i + 1}/{item_count}: {item.title}")
                     self._process_item(item)
+                    self._increment_progress()
 
-            except Exception as e:
-                log.error(f"Error processing library {library.title}: {e}")
-
-        self.cache.save()
-        log.info("Artwork update finished.")
+            self.cache.save()
+            log.info("Artwork update finished.")
+        finally:
+            self.is_running = False
+            self._set_status("idle")
 
     def _get_api_keys_from_config(self):
         self.tmdb_key = self.config.get("tmdb_key", "")
@@ -554,6 +626,12 @@ class PArt:
         else:
             lib_names = [name.strip() for name in libraries_env.split(',')]
             self.libraries = [lib for lib in all_libraries if lib.title in lib_names]
+            missing = [name for name in lib_names if name and name not in [lib.title for lib in self.libraries]]
+            if missing:
+                log.warning(f"Could not find the following libraries: {', '.join(missing)}")
+
+        if not self.libraries:
+            log.error("No matching Plex libraries were resolved from configuration.")
 
     def _get_processing_options_from_config(self):
         self.include_backgrounds = self.config.get("include_backgrounds", True)
@@ -743,24 +821,43 @@ class PArt:
             print(f"\n✗ Error fetching libraries: {e}")
             self.libraries = []
 
-    def _connect_to_plex(self):
-        print("\n[Step 1/5] Plex Connection")
-        plex_url = os.getenv("PLEX_URL") or self._get_input("Plex URL", self.config.get("plex_url", "http://localhost:32400"))
-        plex_token = os.getenv("PLEX_TOKEN") or self._get_input("Plex Token", self.config.get("plex_token", ""))
+    def _connect_to_plex(self, interactive: bool = True) -> bool:
+        if interactive:
+            print("\n[Step 1/5] Plex Connection")
+
+        default_url = self.config.get("plex_url", "http://localhost:32400")
+        default_token = self.config.get("plex_token", "")
+        plex_url = os.getenv("PLEX_URL") or default_url
+        plex_token = os.getenv("PLEX_TOKEN") or default_token
+
+        if interactive:
+            plex_url = os.getenv("PLEX_URL") or self._get_input("Plex URL", plex_url)
+            plex_token = os.getenv("PLEX_TOKEN") or self._get_input("Plex Token", plex_token)
+
+        if not plex_url or not plex_token:
+            if interactive:
+                print("\nCannot continue without Plex connection. Exiting.")
+            else:
+                log.error("Cannot start artwork update: Plex URL or token is missing. Set them in the Configuration page.")
+            self.plex = None
+            return False
 
         try:
-            # Increase timeout to 120 seconds for slow connections
             self.plex = PlexServer(plex_url, plex_token, timeout=120)
             log.info(f"Connected to Plex: {self.plex.friendlyName}")
             self.config.set("plex_url", plex_url)
             self.config.set("plex_token", plex_token)
             self.config.save()
+            return True
         except Unauthorized:
             log.error("Plex connection failed: Invalid token.")
-            self.plex = None
         except Exception as e:
             log.error(f"Plex connection failed: {e}")
-            self.plex = None
+
+        self.plex = None
+        if interactive:
+            print("\nCannot continue without Plex connection. Exiting.")
+        return False
 
     def _get_input(self, prompt: str, default: str = "") -> str:
         if default:
