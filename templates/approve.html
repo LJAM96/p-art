@@ -23,6 +23,14 @@
         {% if not changes %}
         <div class="alert alert-info">No artwork changes are awaiting approval.</div>
         {% else %}
+        <div class="mb-3">
+            <form action="/approve_all" method="post" style="display: inline;">
+                <button type="submit" class="btn btn-success">Approve All</button>
+            </form>
+            <form action="/decline_all" method="post" style="display: inline;">
+                <button type="submit" class="btn btn-danger">Decline All</button>
+            </form>
+        </div>
         <form action="/apply_changes" method="post">
             <table class="table table-striped">
                 <thead>
