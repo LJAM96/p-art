@@ -13,6 +13,18 @@ from pathlib import Path
 from urllib.parse import urlparse
 from collections import deque
 
+# Import new modules
+from constants import (
+    ProviderName, MediaType, ArtworkType, DEFAULT_CONFIG, BOOL_KEYS,
+    RATE_LIMITS, PROVIDER_HOSTS, ASPECT_RATIOS, CACHE_BATCH_SIZE,
+    CACHE_AUTO_SAVE_INTERVAL, DEFAULT_COOLDOWN, RATE_LIMIT_COOLDOWN
+)
+from quota_tracker import QuotaTracker
+from history_log import HistoryLog
+from webhooks import WebhookNotifier
+from backup_manager import BackupManager
+from plugin_system import PluginManager
+
 class WebLogHandler(logging.Handler):
     def __init__(self, enqueue_callback):
         super().__init__()
@@ -66,6 +78,8 @@ class Cache:
         self.cache_path = cache_path
         self._cache = self._load()
         self._lock = threading.Lock()
+        self._pending_writes = 0
+        self._last_save_time = time.time()
 
     def _load(self) -> Dict[str, Dict[str, dict]]:
         if self.cache_path.exists():
@@ -75,12 +89,26 @@ class Cache:
                 pass
         return {}
 
-    def save(self):
+    def save(self, force: bool = False):
+        """Save cache to disk. Can be batched unless force=True."""
         try:
             with self._lock:
                 self.cache_path.write_text(json.dumps(self._cache, indent=2))
+                self._pending_writes = 0
+                self._last_save_time = time.time()
         except Exception:
             pass
+
+    def save_if_needed(self):
+        """Save cache if batch size reached or time interval passed."""
+        with self._lock:
+            should_save = (
+                self._pending_writes >= CACHE_BATCH_SIZE or
+                time.time() - self._last_save_time >= CACHE_AUTO_SAVE_INTERVAL
+            )
+
+        if should_save:
+            self.save()
 
     def get(self, namespace: str, key: str):
         with self._lock:
@@ -89,12 +117,14 @@ class Cache:
     def set(self, namespace: str, key: str, value):
         with self._lock:
             self._cache.setdefault(namespace, {})[key] = value
+            self._pending_writes += 1
 
 
 class Config:
     def __init__(self, config_path: Path):
         self.config_path = config_path
         self.config = self._load()
+        self._lock = threading.Lock()
 
     def _load(self) -> dict:
         if self.config_path.exists():
@@ -108,24 +138,28 @@ class Config:
 
     def save(self):
         try:
-            self.config_path.write_text(json.dumps(self.config, indent=2))
+            with self._lock:
+                self.config_path.write_text(json.dumps(self.config, indent=2))
         except Exception:
             pass
 
     def ensure_defaults(self, defaults: Dict[str, object]):
-        changed = False
-        for key, value in defaults.items():
-            if key not in self.config:
-                self.config[key] = value
-                changed = True
+        with self._lock:
+            changed = False
+            for key, value in defaults.items():
+                if key not in self.config:
+                    self.config[key] = value
+                    changed = True
         if changed:
             self.save()
 
     def get(self, key: str, default=None):
-        return self.config.get(key, default)
+        with self._lock:
+            return self.config.get(key, default)
 
     def set(self, key: str, value):
-        self.config[key] = value
+        with self._lock:
+            self.config[key] = value
 
 
 from abc import ABC, abstractmethod
@@ -196,8 +230,8 @@ class TMDbProvider(Provider):
                      for b in data.get("backdrops", []) if b.get("file_path")]
 
         res = ArtResult(
-            poster_url=self.part._pick_best_image(posters, min_poster_w),
-            background_url=self.part._pick_best_image(backdrops, min_back_w),
+            poster_url=self.part._pick_best_image(posters, min_poster_w, ASPECT_RATIOS[ArtworkType.POSTER]),
+            background_url=self.part._pick_best_image(backdrops, min_back_w, ASPECT_RATIOS[ArtworkType.BACKGROUND]),
             source="tmdb"
         )
         self.part.cache.set(ns, key, res.__dict__)
@@ -239,8 +273,8 @@ class FanartProvider(Provider):
         backgrounds = [{"url": i.get("url"), "width": int(i.get("width", 0))} for i in bg_sets if i.get("url")]
 
         res = ArtResult(
-            poster_url=self.part._pick_best_image(posters, min_poster_w),
-            background_url=self.part._pick_best_image(backgrounds, min_back_w),
+            poster_url=self.part._pick_best_image(posters, min_poster_w, ASPECT_RATIOS[ArtworkType.POSTER]),
+            background_url=self.part._pick_best_image(backgrounds, min_back_w, ASPECT_RATIOS[ArtworkType.BACKGROUND]),
             source="fanart"
         )
         self.part.cache.set(ns, key, res.__dict__)
@@ -311,7 +345,11 @@ class TVDbProvider(Provider):
         posters = []
         if "data" in data:
             for p in data["data"]:
-                posters.append({"url": f"{base}/banners/{p['fileName']}", "width": p.get("resolution", "0x0").split('x')[0]})
+                try:
+                    width = int(p.get("resolution", "0x0").split('x')[0])
+                except (ValueError, IndexError):
+                    width = 0
+                posters.append({"url": f"{base}/banners/{p['fileName']}", "width": width})
 
         r = self.part._safe_get(f"{base}/v3/series/{tvdb_id}/images/query", params={"keyType": "fanart"}, headers=headers)
         if not r:
@@ -320,11 +358,15 @@ class TVDbProvider(Provider):
         backgrounds = []
         if "data" in data:
             for b in data["data"]:
-                backgrounds.append({"url": f"{base}/banners/{b['fileName']}", "width": b.get("resolution", "0x0").split('x')[0]})
+                try:
+                    width = int(b.get("resolution", "0x0").split('x')[0])
+                except (ValueError, IndexError):
+                    width = 0
+                backgrounds.append({"url": f"{base}/banners/{b['fileName']}", "width": width})
 
         res = ArtResult(
-            poster_url=self.part._pick_best_image(posters, min_poster_w),
-            background_url=self.part._pick_best_image(backgrounds, min_back_w),
+            poster_url=self.part._pick_best_image(posters, min_poster_w, ASPECT_RATIOS[ArtworkType.POSTER]),
+            background_url=self.part._pick_best_image(backgrounds, min_back_w, ASPECT_RATIOS[ArtworkType.BACKGROUND]),
             source="tvdb"
         )
         self.part.cache.set(ns, key, res.__dict__)
@@ -332,24 +374,8 @@ class TVDbProvider(Provider):
 
 
 class PArt:
-    CONFIG_DEFAULTS = {
-        "plex_url": "",
-        "plex_token": "",
-        "libraries": "all",
-        "tmdb_key": "",
-        "fanart_key": "",
-        "omdb_key": "",
-        "tvdb_key": "",
-        "include_backgrounds": True,
-        "overwrite": False,
-        "dry_run": True,
-        "artwork_language": "en",
-        "provider_priority": "tmdb,fanart,omdb",
-        "final_approval": False,
-        "treat_generated_posters_as_missing": False,
-    }
-
-    BOOL_KEYS = {"include_backgrounds", "overwrite", "dry_run", "final_approval", "treat_generated_posters_as_missing"}
+    CONFIG_DEFAULTS = DEFAULT_CONFIG
+    BOOL_KEYS = BOOL_KEYS
 
     def __init__(self):
         self.config = Config(Path(".p_art_config.json"))
@@ -357,20 +383,8 @@ class PArt:
         self.cache = Cache(Path(".provider_cache.json"))
         self.plex: Optional[PlexServer] = None
         self.session = requests.Session()
-        self.limiters = {
-            "api.themoviedb.org": RateLimiter(rate_per_sec=2.0),
-            "webservice.fanart.tv": RateLimiter(rate_per_sec=1.0),
-            "www.omdbapi.com": RateLimiter(rate_per_sec=3.0),
-            "api.thetvdb.com": RateLimiter(rate_per_sec=1.0),
-            "api4.thetvdb.com": RateLimiter(rate_per_sec=1.0),
-        }
-        self._provider_hosts = {
-            "api.themoviedb.org": "tmdb",
-            "webservice.fanart.tv": "fanart",
-            "www.omdbapi.com": "omdb",
-            "api.thetvdb.com": "tvdb",
-            "api4.thetvdb.com": "tvdb",
-        }
+        self.limiters = {host: RateLimiter(rate_per_sec=rate) for host, rate in RATE_LIMITS.items()}
+        self._provider_hosts = {host: name.value for host, name in PROVIDER_HOSTS.items()}
         self._change_log: List[ChangeLogEntry] = []
         self.proposed_changes: List[Dict] = []
 
@@ -384,6 +398,25 @@ class PArt:
         self.event_queue = self._event_queue
         self.treat_generated_posters_as_missing = False
         self.generated_poster_aspect_threshold = 1.0
+
+        # Initialize new modules
+        self.quota_tracker = QuotaTracker()
+        self.history_log = HistoryLog()
+        backup_enabled = self.config.get("backup_artwork", False)
+        self.backup_manager = BackupManager(enabled=backup_enabled)
+        webhook_url = os.getenv("WEBHOOK_URL") or self.config.get("webhook_url", "")
+        self.webhook = WebhookNotifier(webhook_url=webhook_url, enabled=bool(webhook_url))
+        self.plugin_manager = PluginManager()
+        self.plugin_manager.discover_plugins()
+
+        # Min artwork dimensions
+        self.min_poster_width = int(os.getenv("MIN_POSTER_WIDTH") or self.config.get("min_poster_width", 600))
+        self.min_background_width = int(os.getenv("MIN_BACKGROUND_WIDTH") or self.config.get("min_background_width", 1920))
+
+        # Track processing stats
+        self.start_time = 0
+        self.items_processed = 0
+        self.items_changed = 0
 
         log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
         log_level = getattr(logging, log_level_str, logging.INFO)
@@ -516,6 +549,7 @@ class PArt:
         host = self._host_of(url)
         if host in self.limiters:
             self.limiters[host].wait()
+        r = None
         for attempt in range(4):
             try:
                 log.debug(f"Requesting: {url}")
@@ -566,12 +600,16 @@ class PArt:
                         retry_after = int(r.headers.get("Retry-After", "0"))
                     except Exception:
                         retry_after = 0
-                sleep_time = max(retry_after, 1) * (1 + 0.25 * random.random()) * (2 ** attempt)
-                log.warning(f"Request to {url} failed with status {r.status_code}. Retrying in {sleep_time:.2f} seconds.")
-                time.sleep(min(sleep_time, 30))
+                    sleep_time = max(retry_after, 1) * (1 + 0.25 * random.random()) * (2 ** attempt)
+                    log.warning(f"Request to {url} failed with status {r.status_code}. Retrying in {sleep_time:.2f} seconds.")
+                    time.sleep(min(sleep_time, 30))
+                elif r:
+                    sleep_time = (1 + 0.25 * random.random()) * (2 ** attempt)
+                    log.warning(f"Request to {url} failed with status {r.status_code}. Retrying in {sleep_time:.2f} seconds.")
+                    time.sleep(min(sleep_time, 30))
             except requests.RequestException as e:
-                log.error(f"Request to {url} failed: {e}")
-                pass
+                log.warning(f"Request to {url} failed: {e}. Retrying in {2 ** attempt} seconds.")
+                time.sleep(min(2 ** attempt, 30))
         return None
 
     def _resolve_external_ids(self, item) -> Dict[str, str]:
@@ -602,22 +640,49 @@ class PArt:
                 ids["imdb"] = m.group(1)
         return ids
 
-    def _pick_best_image(self, images, min_width):
+    def _pick_best_image(self, images, min_width, preferred_aspect_ratio: Optional[Tuple[int, int]] = None):
+        """Pick best image considering width and aspect ratio."""
         best = None
-        best_w = 0
+        best_score = 0
+
         for img in images or []:
             w = img.get("width") or img.get("w") or img.get("size") or 0
+            h = img.get("height") or img.get("h") or 0
+
             if isinstance(w, str):
                 try:
                     w = int(w)
                 except ValueError:
                     w = 0
+
+            if isinstance(h, str):
+                try:
+                    h = int(h)
+                except ValueError:
+                    h = 0
+
             url = img.get("url") or img.get("source") or img.get("link") or img.get("image")
-            if not url:
+            if not url or w < min_width:
                 continue
-            if w >= min_width and w > best_w:
+
+            # Calculate score based on width and aspect ratio match
+            score = w
+
+            # Bonus for aspect ratio match if preferred ratio is specified
+            if preferred_aspect_ratio and h > 0:
+                target_ratio = preferred_aspect_ratio[0] / preferred_aspect_ratio[1]
+                actual_ratio = w / h
+                ratio_diff = abs(target_ratio - actual_ratio)
+
+                # Penalize images that don't match preferred aspect ratio
+                # Max penalty is 50% of the width score
+                aspect_penalty = min(ratio_diff * w * 0.5, w * 0.5)
+                score -= aspect_penalty
+
+            if score > best_score:
                 best = url
-                best_w = w
+                best_score = score
+
         return best
 
     def _get_processing_options(self):
@@ -778,8 +843,12 @@ class PArt:
                 processed += 1
                 log.info(f"-> Processing {i}/{len(work_items)}: {getattr(item, 'title', 'Unknown')}")
                 self._process_item(item, needs_poster, needs_background)
+                self.cache.save_if_needed()
 
-        self.cache.save()
+        self.cache.save(force=True)
+        self.quota_tracker.save()
+        self.history_log.cleanup_old_data()
+        self.quota_tracker.cleanup_old_data()
 
         print(f"\n{'=' * 60}")
         print(f"Processing complete! Updated {processed} items out of {total_candidates} scanned.")
@@ -796,15 +865,20 @@ class PArt:
         self._change_log = []
         self.proposed_changes = []
         self._reset_progress(0)
+        self.start_time = time.time()
+        self.items_processed = 0
+        self.items_changed = 0
 
         try:
             if not self._connect_to_plex(interactive=False):
+                self.webhook.notify_error("Failed to connect to Plex server")
                 return
 
             self._get_api_keys_from_config()
             self._get_libraries_from_config()
             if not getattr(self, "libraries", None):
                 log.error("No Plex libraries configured. Update cancelled.")
+                self.webhook.notify_error("No Plex libraries configured")
                 return
 
             self._get_processing_options_from_config()
@@ -829,6 +903,9 @@ class PArt:
             if not self.providers:
                 log.warning("No artwork providers are configured; skipping artwork lookup.")
 
+            # Notify start
+            self.webhook.notify_started(len(self.libraries), total_work_items)
+
             for batch in batches:
                 library = batch["library"]
                 work_items = batch["work_items"]
@@ -851,9 +928,30 @@ class PArt:
                     log.info(f"-> Processing {i}/{len(work_items)}: {getattr(item, 'title', 'Unknown')}")
                     self._process_item(item, needs_poster, needs_background)
                     self._increment_progress()
+                    self.cache.save_if_needed()
 
-            self.cache.save()
-            log.info("Artwork update finished.")
+            self.cache.save(force=True)
+            self.quota_tracker.save()
+            self.backup_manager.save()
+
+            # Deduplicate proposals if final approval is enabled
+            if self.final_approval and self.proposed_changes:
+                self.deduplicate_proposals()
+                log.info(f"Queued {len(self.proposed_changes)} changes for approval")
+
+            # Cleanup old data
+            self.history_log.cleanup_old_data()
+            self.quota_tracker.cleanup_old_data()
+            self.backup_manager.cleanup_old_backups()
+
+            duration = time.time() - self.start_time
+            log.info(f"Artwork update finished in {duration:.1f}s")
+
+            # Notify completion
+            self.webhook.notify_completed(self.items_processed, self.items_changed, duration)
+        except Exception as e:
+            log.error(f"Error during artwork update: {e}")
+            self.webhook.notify_error(str(e))
         finally:
             self.is_running = False
             self._set_status("idle")
@@ -882,34 +980,80 @@ class PArt:
     def _get_processing_options_from_config(self):
         include_backgrounds_env = os.getenv("INCLUDE_BACKGROUNDS")
         self.include_backgrounds = include_backgrounds_env.lower() in ('true', '1', 'y', 'yes') if include_backgrounds_env else self.config.get("include_backgrounds", True)
-        
+
         only_missing_env = os.getenv("ONLY_MISSING")
         if only_missing_env and only_missing_env.lower() in ('true', '1', 'y', 'yes'):
             self.overwrite = False
         else:
             overwrite_env = os.getenv("OVERWRITE")
             self.overwrite = overwrite_env.lower() in ('true', '1', 'y', 'yes') if overwrite_env else self.config.get("overwrite", False)
-        
+
         dry_run_env = os.getenv("DRY_RUN")
         self.dry_run = dry_run_env.lower() in ('true', '1', 'y', 'yes') if dry_run_env else self.config.get("dry_run", True)
-        
+
         self.artwork_language = os.getenv("ARTWORK_LANGUAGE") or self.config.get("artwork_language", "en")
-        self.final_approval = self.config.get("final_approval", False)
+
+        final_approval_env = os.getenv("FINAL_APPROVAL")
+        self.final_approval = final_approval_env.lower() in ('true', '1', 'y', 'yes') if final_approval_env else self.config.get("final_approval", False)
+
         treat_generated_env = os.getenv("TREAT_GENERATED_POSTERS_AS_MISSING")
         if treat_generated_env:
             self.treat_generated_posters_as_missing = treat_generated_env.lower() in ('true', '1', 'y', 'yes')
         else:
             self.treat_generated_posters_as_missing = self.config.get("treat_generated_posters_as_missing", False)
 
-    def apply_change(self, item_rating_key: str, new_poster: Optional[str], new_background: Optional[str]):
+    def deduplicate_proposals(self):
+        """Deduplicate proposed changes by item rating key."""
+        if not self.proposed_changes:
+            return
+
+        seen = {}
+        deduplicated = []
+
+        for change in self.proposed_changes:
+            key = change.get("item_rating_key")
+            if not key:
+                continue
+
+            if key not in seen:
+                seen[key] = change
+                deduplicated.append(change)
+            else:
+                # Merge with existing proposal
+                existing = seen[key]
+                if change.get("new_poster") and not existing.get("new_poster"):
+                    existing["new_poster"] = change["new_poster"]
+                if change.get("new_background") and not existing.get("new_background"):
+                    existing["new_background"] = change["new_background"]
+                if change.get("uploaded_poster_obj"):
+                    existing["uploaded_poster_obj"] = change["uploaded_poster_obj"]
+                if change.get("uploaded_art_obj"):
+                    existing["uploaded_art_obj"] = change["uploaded_art_obj"]
+
+        self.proposed_changes = deduplicated
+        log.info(f"Deduplicated proposals: {len(self.proposed_changes)} unique items")
+
+    def apply_change(self, item_rating_key: str, new_poster: Optional[str], new_background: Optional[str],
+                     uploaded_poster_obj=None, uploaded_art_obj=None):
         try:
             item = self.plex.fetchItem(int(item_rating_key))
-            if new_poster:
+
+            # If we have uploaded artwork objects, use setPoster/setArt instead of upload
+            if uploaded_poster_obj:
+                item.setPoster(poster=uploaded_poster_obj)
+                log.info(f"Set uploaded poster for {item.title}")
+            elif new_poster:
                 item.uploadPoster(url=new_poster)
                 log.info(f"Set poster for {item.title}")
-            if new_background:
+
+            if uploaded_art_obj:
+                item.setArt(art=uploaded_art_obj)
+                log.info(f"Set uploaded background for {item.title}")
+            elif new_background:
                 item.uploadArt(url=new_background)
                 log.info(f"Set background for {item.title}")
+        except ValueError as e:
+            log.error(f"Invalid item rating key {item_rating_key}: {e}")
         except Exception as e:
             log.error(f"Failed to apply change for item {item_rating_key}: {e}")
 
@@ -1125,6 +1269,24 @@ class PArt:
                 source=result.source,
                 dry_run=self.dry_run
             ))
+            self.items_changed += 1
+
+            # Log to history
+            self.history_log.log_change(
+                item_title=title,
+                poster_changed=poster_applied,
+                background_changed=background_applied,
+                source=result.source,
+                dry_run=self.dry_run,
+                item_rating_key=str(item.ratingKey),
+                media_type=item.type,
+                old_poster_url=getattr(item, 'thumbUrl', None),
+                new_poster_url=result.poster_url if poster_applied else None,
+                old_background_url=getattr(item, 'artUrl', None),
+                new_background_url=result.background_url if background_applied else None
+            )
+
+        self.items_processed += 1
     def _get_api_keys(self):
         print("\n[Step 2/5] API Keys")
         print("Enter your API keys (press Enter to skip)")

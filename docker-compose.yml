@@ -38,6 +38,25 @@ services:
       # Logging (optional)
       #LOG_LEVEL: "INFO"
       #LOG_FILE: "/var/log/p-art.log"
-      
+
       # Scheduling (optional)
-      #CRON_SCHEDULE: "0 2 * * *"
+      #ENABLE_SCHEDULER: "false"
+      #SCHEDULE_CRON: "0 2 * * *"
+
+      # Webhook Notifications (optional)
+      #WEBHOOK_URL: ""
+
+      # Artwork Quality (optional)
+      #MIN_POSTER_WIDTH: "600"
+      #MIN_BACKGROUND_WIDTH: "1920"
+
+      # Advanced Features (optional)
+      #ENABLE_SEASONS: "false"
+      #ENABLE_EPISODES: "false"
+      #ENABLE_COLLECTIONS: "false"
+      #BACKUP_ARTWORK: "false"
+
+      # Authentication (optional - set password to enable)
+      #ENABLE_AUTH: "false"
+      #AUTH_USERNAME: "admin"
+      #AUTH_PASSWORD: ""

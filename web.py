@@ -14,11 +14,34 @@ import queue
 import threading
 import time
 
+from flask_wtf.csrf import CSRFProtect
 from health_checks import run_checks
 from p_art import PArt
+from auth import AuthManager
+from scheduler import ArtworkScheduler
 
 app = Flask(__name__)
+app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', os.urandom(24).hex())
+
+# CSRF Protection
+csrf = CSRFProtect(app)
+
+# Initialize PArt
 part = PArt()
+
+# Initialize authentication
+auth_enabled = os.getenv('ENABLE_AUTH', '').lower() in ('true', '1', 'y', 'yes') or part.config.get('enable_auth', False)
+auth_username = os.getenv('AUTH_USERNAME') or part.config.get('auth_username', 'admin')
+auth_password = os.getenv('AUTH_PASSWORD') or part.config.get('auth_password', '')
+auth_manager = AuthManager(enabled=auth_enabled, username=auth_username, password=auth_password)
+
+# Initialize scheduler
+scheduler_enabled = os.getenv('ENABLE_SCHEDULER', '').lower() in ('true', '1', 'y', 'yes') or part.config.get('enable_scheduler', False)
+schedule_cron = os.getenv('SCHEDULE_CRON') or part.config.get('schedule_cron', '0 2 * * *')
+scheduler = ArtworkScheduler(enabled=scheduler_enabled, cron_schedule=schedule_cron)
+
+if scheduler_enabled:
+    scheduler.start(lambda: threading.Thread(target=part.run_web, daemon=True).start())
 
 ENV_VAR_MAP = {
     "plex_url": "PLEX_URL",
@@ -35,6 +58,12 @@ ENV_VAR_MAP = {
     "provider_priority": "PROVIDER_PRIORITY",
     "final_approval": "FINAL_APPROVAL",
     "treat_generated_posters_as_missing": "TREAT_GENERATED_POSTERS_AS_MISSING",
+    "webhook_url": "WEBHOOK_URL",
+    "min_poster_width": "MIN_POSTER_WIDTH",
+    "min_background_width": "MIN_BACKGROUND_WIDTH",
+    "backup_artwork": "BACKUP_ARTWORK",
+    "enable_scheduler": "ENABLE_SCHEDULER",
+    "schedule_cron": "SCHEDULE_CRON",
 }
 
 FIELD_HEALTH_MAP = {
@@ -74,16 +103,22 @@ def _build_config_items():
 
 
 @app.route('/')
+@auth_manager.requires_auth
 def index():
     initial_progress = {"completed": part.progress_done, "total": part.progress_total}
+    next_run = scheduler.get_next_run_time() if scheduler_enabled else None
     return render_template(
         'index.html',
         config=part.config.config,
         is_running=part.is_running,
-        initial_progress=initial_progress
+        initial_progress=initial_progress,
+        scheduler_enabled=scheduler_enabled,
+        next_scheduled_run=next_run
     )
 
+
 @app.route('/run', methods=['POST'])
+@auth_manager.requires_auth
 def run():
     part.config.set("final_approval", "final_approval" in request.form)
     part.config.save()
@@ -92,7 +127,10 @@ def run():
     threading.Thread(target=part.run_web, daemon=True).start()
     return redirect(url_for('index'))
 
+
 @app.route('/stream')
+@auth_manager.requires_auth
+@csrf.exempt  # Exempt SSE from CSRF
 def stream():
     heartbeat_interval = 15
 
@@ -125,15 +163,21 @@ def stream():
 
 
 @app.route('/health')
+@csrf.exempt
 def health():
     return jsonify(run_checks())
 
+
 @app.route('/approve')
+@auth_manager.requires_auth
 def approve():
     return render_template('approve.html', changes=part.proposed_changes)
 
+
 @app.route('/apply_changes', methods=['POST'])
+@auth_manager.requires_auth
 def apply_changes():
+    approved_count = 0
     for i, change in enumerate(part.proposed_changes):
         action = request.form.get(f'action_{i}')
         if action == 'approve':
@@ -142,12 +186,84 @@ def apply_changes():
             new_background = request.form.get(f'new_background_{i}')
             uploaded_poster_obj = change.get('uploaded_poster_obj')
             uploaded_art_obj = change.get('uploaded_art_obj')
-            part.apply_change(item_rating_key, new_poster, new_background, 
+            part.apply_change(item_rating_key, new_poster, new_background,
                             uploaded_poster_obj, uploaded_art_obj)
+            approved_count += 1
     part.proposed_changes = []
+    part.history_log.log_change(
+        item_title=f"Batch approval of {approved_count} items",
+        poster_changed=True,
+        dry_run=False,
+        source="manual_approval"
+    )
     return redirect(url_for('approve'))
 
+
+@app.route('/approve_all', methods=['POST'])
+@auth_manager.requires_auth
+def approve_all():
+    """Approve all pending changes."""
+    approved_count = 0
+    for change in part.proposed_changes:
+        item_rating_key = change.get('item_rating_key')
+        new_poster = change.get('new_poster')
+        new_background = change.get('new_background')
+        uploaded_poster_obj = change.get('uploaded_poster_obj')
+        uploaded_art_obj = change.get('uploaded_art_obj')
+        if item_rating_key:
+            part.apply_change(item_rating_key, new_poster, new_background,
+                            uploaded_poster_obj, uploaded_art_obj)
+            approved_count += 1
+    part.proposed_changes = []
+    part.history_log.log_change(
+        item_title=f"Batch approval (all): {approved_count} items",
+        poster_changed=True,
+        dry_run=False,
+        source="batch_approval"
+    )
+    return redirect(url_for('approve'))
+
+
+@app.route('/decline_all', methods=['POST'])
+@auth_manager.requires_auth
+def decline_all():
+    """Decline all pending changes."""
+    declined_count = len(part.proposed_changes)
+    part.proposed_changes = []
+    part.history_log.log_change(
+        item_title=f"Batch decline: {declined_count} items",
+        dry_run=True,
+        source="batch_decline"
+    )
+    return redirect(url_for('approve'))
+
+
+@app.route('/monitoring')
+@auth_manager.requires_auth
+def monitoring():
+    """Health monitoring dashboard."""
+    # Get quota usage
+    quota_stats = part.quota_tracker.get_all_usage()
+
+    # Get history statistics
+    history_stats = part.history_log.get_statistics()
+
+    # Get recent changes
+    recent_changes = part.history_log.get_recent_changes(limit=50, skip_dry_run=True)
+
+    return render_template(
+        'monitoring.html',
+        quota_stats=quota_stats,
+        history_stats=history_stats,
+        recent_changes=recent_changes,
+        scheduler_enabled=scheduler_enabled,
+        next_scheduled_run=scheduler.get_next_run_time() if scheduler_enabled else None,
+        is_running=part.is_running
+    )
+
+
 @app.route('/config', methods=['GET', 'POST'])
+@auth_manager.requires_auth
 def config():
     if request.method == 'POST':
         for key in PArt.CONFIG_DEFAULTS.keys():
@@ -160,6 +276,13 @@ def config():
             else:
                 part.config.set(key, request.form.get(key, "").strip())
         part.config.save()
+
+        # Update scheduler if configuration changed
+        if scheduler_enabled:
+            new_cron = part.config.get('schedule_cron', '0 2 * * *')
+            if new_cron != schedule_cron:
+                scheduler.reschedule(new_cron)
+
         return redirect(url_for('config'))
 
     health_status = run_checks()
@@ -168,6 +291,7 @@ def config():
         config_items=_build_config_items(),
         health_status=health_status,
     )
+
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0')
